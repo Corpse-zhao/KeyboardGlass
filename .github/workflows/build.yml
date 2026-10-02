@@ -43,12 +43,37 @@ jobs:
       - name: Inspect package contents
         run: |
           ls -la packages/
-          for f in packages/*.deb; do
-            echo "===== $f"
-            dpkg-deb -c "$f"
-            echo "----- control"
-            dpkg-deb -f "$f"
-          done
+          python3 - <<'PY'
+          import glob, io, os, tarfile
+          for path in sorted(glob.glob("packages/*.deb")):
+              print("=====", path, os.path.getsize(path), "bytes")
+              raw = open(path, "rb").read()
+              off, data_tar = 8, None
+              while off < len(raw):
+                  hdr = raw[off:off+60]
+                  if len(hdr) < 60:
+                      break
+                  name = hdr[0:16].decode().strip()
+                  size = int(hdr[48:58].decode().strip())
+                  off += 60
+                  body = raw[off:off+size]
+                  off += size + (size % 2)
+                  if name.startswith("control.tar"):
+                      with tarfile.open(fileobj=io.BytesIO(body)) as tf:
+                          try:
+                              print("--- control:")
+                              print(tf.extractfile("./control").read().decode())
+                          except Exception as exc:
+                              print("control 读取失败:", exc)
+                  if name.startswith("data.tar"):
+                      data_tar = body
+              if data_tar:
+                  with tarfile.open(fileobj=io.BytesIO(data_tar)) as tf:
+                      names = sorted(n for n in tf.getnames() if not n.endswith("/"))
+                      print("--- payload (%d 个文件):" % len(names))
+                      for n in names:
+                          print("   ", n)
+          PY
 
       - name: Verify dylib arch slices
         run: |
