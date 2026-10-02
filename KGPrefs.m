@@ -1,4 +1,5 @@
 #import "KGPrefs.h"
+#import <stdarg.h>
 
 NSString * const KGPrefsSuiteName = @"com.banli.keyboardglass.preferences";
 

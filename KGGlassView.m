@@ -23,7 +23,9 @@ static void KGApplyBlur(CALayer *layer, CGFloat radius) {
 
 // 顶部敞开的环形路径: 只保留上边与左右两侧, 底部往下多画 40pt 让底边跑出可视区,
 // 这样键盘贴着屏幕底边的那一圈不会出现多余的高光/折射。
-static CGPathRef KGCreateTopRingPath(CGRect bounds, CGFloat radius, CGFloat ringWidth) {
+// 返回 UIBezierPath 而不是 CGPathRef —— CGPathRef 由这个局部对象持有, 直接返回它
+// 会在函数返回后变成悬垂指针。
+static UIBezierPath *KGMakeTopRingPath(CGRect bounds, CGFloat radius, CGFloat ringWidth) {
     CGFloat safeRadius = MAX(0, MIN(radius, bounds.size.width / 2.0));
     CGFloat w = MAX(0.5, ringWidth);
 
@@ -38,7 +40,7 @@ static CGPathRef KGCreateTopRingPath(CGRect bounds, CGFloat radius, CGFloat ring
                                                byRoundingCorners:UIRectCornerTopLeft | UIRectCornerTopRight
                                                      cornerRadii:CGSizeMake(innerRadius, innerRadius)];
     [path appendPath:inner];
-    return path.CGPath;
+    return path;
 }
 
 @interface KGGlassView ()
@@ -139,7 +141,8 @@ static CGPathRef KGCreateTopRingPath(CGRect bounds, CGFloat radius, CGFloat ring
 
         // mask 会跟着 transform 一起被放大, 所以要先把环宽除回去
         CGFloat ringWidth = refraction / scale;
-        self.refractMask.path = KGCreateTopRingPath(bounds, style.cornerRadius, ringWidth);
+        UIBezierPath *refractRing = KGMakeTopRingPath(bounds, style.cornerRadius, ringWidth);
+        self.refractMask.path = refractRing.CGPath;
         self.refractLayer.mask = self.refractMask;
     } else {
         self.refractLayer.hidden = YES;
@@ -155,7 +158,8 @@ static CGPathRef KGCreateTopRingPath(CGRect bounds, CGFloat radius, CGFloat ring
         (id)[[UIColor whiteColor] colorWithAlphaComponent:highlight * 0.55].CGColor,
     ];
     self.rimLayer.locations = @[@0.0, @0.45, @1.0];
-    self.rimMask.path = KGCreateTopRingPath(bounds, style.cornerRadius, 1.2);
+    UIBezierPath *rimRing = KGMakeTopRingPath(bounds, style.cornerRadius, 1.2);
+    self.rimMask.path = rimRing.CGPath;
     self.rimLayer.mask = self.rimMask;
 
     KGLog(@"layout glass bounds=%@ blur=%.1f refraction=%.1f highlight=%.2f veil=%.2f dark=%d backdrop=%d",
