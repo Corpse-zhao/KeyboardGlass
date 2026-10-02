@@ -9,8 +9,7 @@
 @interface UIInputWindowController : UIViewController
 @end
 
-@interface UIInputViewController : UIViewController
-@end
+// UIInputViewController 是 iOS 8+ 的公开类, 不需要再声明。
 
 // 入口 1: 系统键盘 —— 住在宿主 App 进程里, 由 UIInputWindowController 管理。
 // 每次布局 (弹出 / 收起 / 旋转 / 切换键盘) 都会走到这里, 借这个时机装玻璃层。

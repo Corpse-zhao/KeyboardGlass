@@ -1,6 +1,7 @@
 #import "KGKeyboardInstaller.h"
 #import "KGGlassView.h"
 #import "KGPrefs.h"
+#import <sys/stat.h>
 
 // 背板类名候选。不同 iOS 版本用的是不同私有类, 这里全部收进来,
 // 命中哪个用哪个 —— 避免把实现绑死在某个类名上。
