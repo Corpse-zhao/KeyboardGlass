@@ -124,10 +124,11 @@ static UIBezierPath *KGMakeTopRingPath(CGRect bounds, CGFloat radius, CGFloat ri
     // ---- 2. 底色 (veil): 深色压黑, 浅色提白 ----
     self.veilLayer.frame = bounds;
     if (self.showOutline) {
-        // 调试描边: 位置对不对只看这个, 跟材质参数无关
-        self.layer.borderWidth = 3.0;
+        // 调试描边: 位置对不对只看这个, 跟材质参数无关。
+        // 填充压得很淡 —— 描边开着时用户还得继续打字, 不能把键盘糊死。
+        self.layer.borderWidth = 2.5;
         self.layer.borderColor = [UIColor colorWithRed:0.0 green:0.85 blue:1.0 alpha:1.0].CGColor;
-        self.veilLayer.backgroundColor = [UIColor colorWithRed:1.0 green:0.0 blue:1.0 alpha:0.30].CGColor;
+        self.veilLayer.backgroundColor = [UIColor colorWithRed:1.0 green:0.0 blue:1.0 alpha:0.10].CGColor;
     } else {
         self.layer.borderWidth = 0.0;
         UIColor *veilColor = dark ? [UIColor blackColor] : [UIColor whiteColor];
