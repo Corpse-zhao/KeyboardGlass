@@ -6,19 +6,37 @@
 #pragma mark - 视图判定
 
 // 键盘宿主视图 —— UIInputSetHostView。
-// 它的 frame 就是键盘矩形本身 (弹出时可以量到 430x291 这种尺寸)。
-// 第 6 版把锚点从「按类名找背板」换成它, 原因见 KG_ANCHOR_NOTE。
+// 它的 frame 就是键盘矩形本身。第 6 版开始用它当锚点, 原因见 KG_ANCHOR_NOTE。
 //
 // KG_ANCHOR_NOTE:
-//   上一版是按类名 (InputBackdrop / KeyboardBackdrop / UIKBBackdropView) 在全树里
-//   找面积最大的背板。用户设备上的探针显示: 全树里唯一命中的是 44x44 的
-//   TUICandidateBackdropView (TextInputUI 的候选栏背板) —— 也就是说系统键盘那
-//   块真正的背景层, 类名压根不在候选表里, 或者那一刻还没进视图树。
-//   依赖类名猜测太脆, 于是改为依赖层级结构: 先拿到一定存在的宿主视图,
-//   再在宿主的孩子里按「铺满」和「是不是按键前景」两条规则认背景层。
+//   第 5 版之前是按类名 (InputBackdrop / KeyboardBackdrop / UIKBBackdropView)
+//   在全树里找面积最大的背板。用户探针显示唯一命中的是 44x44 的
+//   TUICandidateBackdropView (TextInputUI 的候选栏背板) —— 真正那块键盘背景
+//   压根不在候选表里。依赖私有类名太脆, 改为依赖层级结构。
+//
+// KG_LAYOUT_LOOP_NOTE (第 7 版教训, 血亏):
+//   一个进程里会同时存在**多个** UIInputSetHostView, 而且它们会随键盘动画
+//   在 576 / 621 / 932 之间变换位置和高度。第 6 版对每个宿主都响应, 玻璃层
+//   被几十次/秒地在宿主之间搬来搬去 —— 每次搬动都触发宿主重新布局, 于是
+//   形成布局反馈死循环, 键盘整个卡死, 用户表现为「打不了字」。
+//   所以本版两条铁律:
+//     1) 锁定一个「可用宿主」后, 除非它不可用, 否则绝不换
+//     2) 玻璃层已经在目标宿主里就绝不 insert (只在被压到按键上面时才纠正)
 static BOOL KGClassIsInputSetHost(UIView *view) {
     NSString *name = NSStringFromClass(view.class);
     return name.length > 0 && [name containsString:@"InputSetHost"];
+}
+
+// 屏幕可见性。键盘收起/弹出动画途中宿主会被推到 y = 屏高 (完全出屏),
+// 那种状态不能认 —— 认了玻璃层就跟着飞到屏幕外面去了。
+static BOOL KGIsOnScreen(UIView *view) {
+    if (!view || !view.window) return NO;
+    CGRect inWindow = [view convertRect:view.bounds toView:view.window];
+    CGRect visible = CGRectIntersection(inWindow, view.window.bounds);
+    if (CGRectIsNull(visible) || CGRectIsEmpty(visible)) return NO;
+    CGFloat full = view.bounds.size.width * view.bounds.size.height;
+    if (full <= 0) return NO;
+    return (visible.size.width * visible.size.height) >= full * 0.6;
 }
 
 // 键盘尺寸资格: 宽度接近整屏 (iPhone 上键盘一定占满横向), 且按屏宽折算
@@ -30,6 +48,13 @@ static BOOL KGIsKeyboardSized(UIView *view) {
     if (screenWidth <= 0) return NO;
     if (view.frame.size.width < screenWidth * 0.85) return NO;
     return (view.frame.size.width * view.frame.size.height) >= screenWidth * 150.0;
+}
+
+// 「可用宿主」= 类名对 + 尺寸对 + 还在屏幕里 + 还挂在树上。
+// 只有这一个判定通过, 才允许接管 / 保持接管。
+static BOOL KGIsUsableHost(UIView *view) {
+    if (!view || !view.superview) return NO;
+    return KGClassIsInputSetHost(view) && KGIsKeyboardSized(view) && KGIsOnScreen(view);
 }
 
 // 往下找「这棵子树里有没有键盘按键内容」。iOS 16 的按键可能住在
@@ -47,8 +72,7 @@ static BOOL KGContainsKeyboardContent(UIView *view, NSUInteger depth) {
     return NO;
 }
 
-// 「按键前景」判定。玻璃层绝不能插到它上面 —— 那会把整个键盘盖住,
-// 按键点不着 (v0.2.0 就是栽在这, 用户键盘直接打不了字)。
+// 「按键前景」判定。玻璃层绝不能插到它上面 —— 那会把整个键盘盖住, 按键点不着。
 static BOOL KGLooksLikeKeyboardForeground(UIView *view) {
     NSString *name = NSStringFromClass(view.class);
     if (name.length == 0) return NO;
@@ -60,7 +84,7 @@ static BOOL KGLooksLikeKeyboardForeground(UIView *view) {
 
 // 这个视图能不能安全地被隐藏 (hideNativeBackdrop)。
 // 名字带 Backdrop 才算背景, 但还要看它肚子里有没有按键内容 ——
-// 有些 iOS 版本的 UIKBInputBackdropView 是个容器, 按键也在里面。
+// 有些版本的 UIKBInputBackdropView 是个容器, 按键也在里面。
 // 把它 alpha 归零, 按键跟着 alpha=0, 系统连触摸都不再派发
 // (hitTest 会跳过 alpha<=0.01 的视图) —— 整块键盘直接打不了字。
 static BOOL KGIsSafeToHide(UIView *view) {
@@ -102,79 +126,64 @@ static void KGWriteProbe(NSString *content) {
     }
 }
 
-static void KGDumpTree(UIView *view, NSUInteger depth, NSMutableString *out, NSInteger *budget) {
-    if (!view || *budget <= 0 || depth > 12) return;
+// 带外观信息的树 dump。第 7 版加的 —— 光看类名和 frame 分不出「哪一层是可见的
+// 键盘背景」, 必须把 alpha / hidden / backgroundColor 一起打出来。
+static void KGDumpTreeDetail(UIView *view, NSUInteger depth, NSMutableString *out, NSInteger *budget) {
+    if (!view || *budget <= 0 || depth > 14) return;
     (*budget)--;
     for (NSUInteger i = 0; i < depth; i++) [out appendString:@"  "];
-    [out appendFormat:@"%@ | %@\n", NSStringFromClass(view.class), NSStringFromCGRect(view.frame)];
+
+    UIColor *bg = view.backgroundColor;
+    NSString *bgDesc = @"-";
+    if (bg) {
+        CGFloat r = 0, g = 0, b = 0, a = 0;
+        if ([bg getRed:&r green:&g blue:&b alpha:&a]) {
+            bgDesc = [NSString stringWithFormat:@"%.2f/%.2f/%.2f/%.2f", r, g, b, a];
+        }
+    }
+    [out appendFormat:@"%@ | %@ a=%.2f h=%d uie=%d bg=%@\n",
+        NSStringFromClass(view.class), NSStringFromCGRect(view.frame),
+        view.alpha, view.hidden, view.userInteractionEnabled, bgDesc];
+
     for (UIView *sub in view.subviews) {
-        KGDumpTree(sub, depth + 1, out, budget);
+        KGDumpTreeDetail(sub, depth + 1, out, budget);
     }
 }
 
-// 整棵树 dump, 只在「找不到宿主」和第三方输入法扩展里用
-static void KGDumpTreeOnce(UIView *root, NSString *tag) {
-    static NSMutableSet *dumped = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ dumped = [NSMutableSet set]; });
-    if ([dumped containsObject:tag]) return;
-    [dumped addObject:tag];
-
+// 只 dump 宿主视图的直接孩子 —— 谁是谁、在第几层, 一眼就能看出来。
+static void KGDumpHostChildren(UIView *host, NSString *tag) {
     NSMutableString *out = [NSMutableString string];
-    [out appendFormat:@"==== [%@] %@ 键盘视图树 ====\n", [NSDate date], tag];
-    NSInteger budget = 300;
-    KGDumpTree(root, 0, out, &budget);
-    [out appendString:@"====\n"];
-    KGWriteProbe(out);
-    KGLog(@"已 dump %@ 视图树", tag);
-}
-
-// 只 dump 宿主视图的直接孩子 —— 这是本版最关键的诊断信息:
-// 谁是背景层、谁是按键前景、我们在第几层, 一眼就能看出来。
-static void KGDumpHostChildrenOnce(UIView *host, NSString *tag) {
-    static NSMutableSet *dumped = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ dumped = [NSMutableSet set]; });
-
-    NSString *key = [NSString stringWithFormat:@"%@|%@", tag, NSStringFromClass(host.class)];
-    if ([dumped containsObject:key]) return;
-    [dumped addObject:key];
-
-    NSMutableString *out = [NSMutableString string];
-    [out appendFormat:@"---- [%@] %@ 宿主视图 class=%@ frame=%@\n",
-        [NSDate date], tag, NSStringFromClass(host.class), NSStringFromCGRect(host.frame)];
+    [out appendFormat:@"---- [%@] %@ 宿主视图 class=%@ frame=%@ onScreen=%d\n",
+        [NSDate date], tag, NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
+        KGIsOnScreen(host)];
     NSArray<UIView *> *subs = host.subviews;
     for (NSUInteger i = 0; i < subs.count; i++) {
         UIView *sub = subs[i];
-        [out appendFormat:@"  #%lu %@ frame=%@ fg=%d\n",
+        [out appendFormat:@"  #%lu %@ frame=%@ fg=%d a=%.2f h=%d\n",
             (unsigned long)i, NSStringFromClass(sub.class), NSStringFromCGRect(sub.frame),
-            KGLooksLikeKeyboardForeground(sub)];
+            KGLooksLikeKeyboardForeground(sub), sub.alpha, sub.hidden];
     }
     [out appendString:@"----\n"];
     KGWriteProbe(out);
-}
-
-// 类名候选 (兜底路径用)。不同 iOS 版本用的私有类不同, 全部收进来 ——
-// 命中哪个用哪个。
-static NSArray<NSString *> *KGBackdropClassHints(void) {
-    static NSArray *hints = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        hints = @[ @"InputBackdrop", @"KeyboardBackdrop", @"UIKBBackdropView" ];
-    });
-    return hints;
 }
 
 #pragma mark -
 
 @interface KGKeyboardInstaller ()
 @property (nonatomic, strong) KGGlassView *glassView;
-@property (nonatomic, weak)   UIView *hostView;          // UIInputSetHostView
-@property (nonatomic, weak)   UIView *nativeBackdrop;    // 宿主里的原生背景层
+@property (nonatomic, weak)   UIView *hostView;          // 锁定的宿主 (UIInputSetHostView)
+@property (nonatomic, weak)   UIView *nativeBackdrop;    // 宿主里的原生背景层 (只用于隐藏)
 @property (nonatomic, assign) CGFloat nativeBackdropAlpha;
 @property (nonatomic, assign) BOOL hasNativeBackdrop;
 @property (nonatomic, assign) KGStyle appliedStyle;
 @property (nonatomic, assign) BOOL hasAppliedStyle;
+@property (nonatomic, assign) BOOL didDumpStableTree;
+@property (nonatomic, assign) BOOL didDumpExtensionTree;
+@property (nonatomic, assign) BOOL didRunSafetyCheck;
+@property (nonatomic, assign) BOOL usingContainerFallback;
+@property (nonatomic, weak)   UIView *fallbackReferent;   // 兜底模式下用来对齐 frame 的宿主
+@property (nonatomic, copy)   NSString *lastProbeSignature;
+@property (nonatomic, assign) NSUInteger probeCount;
 @end
 
 @implementation KGKeyboardInstaller
@@ -190,10 +199,17 @@ static NSArray<NSString *> *KGBackdropClassHints(void) {
 
 #pragma mark - 对外入口
 
-// 最理想的入口: 直接从 UIInputSetHostView 的 layoutSubviews 进来, 宿主视图
-// 现成的, 不用遍历、时机也最准。
+// 最理想的入口: 直接从 UIInputSetHostView 的 layoutSubviews 进来。
 - (void)handleHostView:(UIView *)host {
     if (!KGClassIsInputSetHost(host)) return;
+
+    // 已经退到容器兜底模式: 不再往宿主里塞任何东西
+    if (self.usingContainerFallback) return;
+
+    // 铁律 1: 已经锁定了可用宿主, 别的宿主一律不理。
+    // 一个进程里有多个宿主, 谁最后布局就把玻璃抢过去 —— 这正是键盘卡死的成因。
+    if (self.hostView && self.hostView != host && KGIsUsableHost(self.hostView)) return;
+
     [self refreshWithHost:host];
 }
 
@@ -203,70 +219,374 @@ static NSArray<NSString *> *KGBackdropClassHints(void) {
 
     [KGPrefs debugLog];
 
+    if (self.usingContainerFallback) {
+        [self syncContainerFallback];
+        return;
+    }
+
+    // 锁定的宿主还好用就继续用它
+    if (KGIsUsableHost(self.hostView)) {
+        [self refreshWithHost:self.hostView];
+        return;
+    }
+
     UIView *host = [self findInputSetHostIn:root];
     if (host) {
         [self refreshWithHost:host];
         return;
     }
 
-    // 万一某些 iOS 版本里宿主视图不叫 InputSetHost*: 退回上一版的老路子 ——
+    // 万一某些 iOS 版本里宿主视图不叫 InputSetHost*: 退回老路子 ——
     // 按背板类名在全树里找面积最大的那块, 装到它父视图上。宁可两条路都留着,
     // 也不要出现「换了锚点反而彻底找不到」这种退化。
-    KGDumpTreeOnce(root, @"容器(未找到宿主, 走背板兜底)");
     [self legacyRefreshWithRoot:root];
 }
 
-// 老路子 (v0.1.0 的做法): 类名找背板 + 面积择优。只作为兜底。
-- (void)legacyRefreshWithRoot:(UIView *)root {
-    UIView *found = [self findBackdropByNameIn:root];
-    if (!found) {
-        KGLog(@"兜底也未找到背板 (root=%@)", NSStringFromClass(root.class));
-        return;
+// 容器兜底模式: 玻璃层挂在宿主父视图的最底层, 只跟着宿主的 frame 走。
+// 这个位置永远不会盖住按键, 所以不做任何 z 序操作。
+- (void)syncContainerFallback {
+    UIView *referent = self.fallbackReferent;
+    if (!referent || !referent.superview || !self.glassView) return;
+    if (self.glassView.superview != referent.superview) {
+        [referent.superview insertSubview:self.glassView atIndex:0];
     }
-    if (!KGIsKeyboardSized(found)) {
-        KGLog(@"忽略小背板 %@ frame=%@", NSStringFromClass(found.class), NSStringFromCGRect(found.frame));
-        return;
+    if (!CGRectEqualToRect(self.glassView.frame, referent.frame)) {
+        self.glassView.frame = referent.frame;
     }
-    if (self.glassView && self.glassView.superview == found.superview
-        && self.nativeBackdrop == found) {
-        [self enforceNativeBackdropState];
-        [self applyStyleForMaterial:[KGPrefs material]];
+    self.glassView.hidden = !(KGIsKeyboardSized(referent) && KGIsOnScreen(referent));
+}
+
+// 第三方输入法扩展: 目前只做记录, 结构拿到之后再对准 hook
+- (void)handleExtensionLayout:(UIView *)root {
+    if (!root) return;
+    [KGPrefs debugLog];
+
+    UIView *host = [self findInputSetHostIn:root];
+    if (host) {
+        [self refreshWithHost:host];
         return;
     }
 
-    UIView *host = found.superview;
-    if (!host) return;
+    // 扩展的视图树只 dump 一次, 别每次布局都刷
+    if (self.didDumpExtensionTree) return;
+    self.didDumpExtensionTree = YES;
 
-    [self restoreNativeBackdrop];
-    if (!self.glassView) {
-        self.glassView = [[KGGlassView alloc] initWithFrame:found.frame];
-        self.hasAppliedStyle = NO;
-    }
-    self.glassView.userInteractionEnabled = NO;
-    self.glassView.frame = found.frame;
+    NSMutableString *out = [NSMutableString string];
+    [out appendFormat:@"==== [%@] 输入法扩展视图树 ====\n", [NSDate date]];
+    NSInteger budget = 300;
+    KGDumpTreeDetail(root, 0, out, &budget);
+    [out appendString:@"====\n"];
+    KGWriteProbe(out);
+}
 
-    // 同样必须压在按键前景下面
-    UIView *fg = [self topmostForegroundInHost:host];
-    NSInteger target;
-    if (fg && fg != found) {
-        target = [host.subviews indexOfObject:fg];
-        NSInteger cur = [host.subviews indexOfObject:self.glassView];
-        if (cur != NSNotFound && cur < target) target--;
-        [host insertSubview:self.glassView atIndex:(NSUInteger)MAX(0, target)];
-    } else {
-        [host insertSubview:self.glassView aboveSubview:found];
+#pragma mark - 主流程
+
+- (void)refreshWithHost:(UIView *)host {
+    [KGPrefs debugLog];
+
+    KGMaterial material = [KGPrefs material];
+    if (material == KGMaterialOff) {
+        [self teardown];
+        return;
     }
+
+    // 键盘收起 / 移出屏幕: 只是藏起来, 千万不能因此换宿主
+    if (!KGIsKeyboardSized(host) || !KGIsOnScreen(host)) {
+        if (self.glassView.superview == host) self.glassView.hidden = YES;
+        return;
+    }
+
+    if (self.hostView != host) {
+        KGLog(@"锁定宿主 %@ frame=%@", NSStringFromClass(host.class), NSStringFromCGRect(host.frame));
+        self.hostView = host;
+        [self.glassView removeFromSuperview];   // 只有换宿主时才搬一次
+        [self restoreNativeBackdrop];
+        self.glassView.hidden = YES;
+
+        KGDumpHostChildren(host, @"锁定宿主");
+        [self scheduleStableTreeDump:host];
+    }
+
+    [self placeGlassInHost:host];
     self.glassView.hidden = NO;
 
-    self.hostView = host;
-    self.nativeBackdrop = found;
-    self.nativeBackdropAlpha = found.alpha;
-    self.hasNativeBackdrop = YES;
-
+    UIView *bg = self.nativeBackdrop;
     [self enforceNativeBackdropState];
-    [self applyStyleForMaterial:[KGPrefs material]];
-    [self writeInstallProbeWithHost:host background:found material:[KGPrefs material]];
-    KGLog(@"兜底路径命中背板 %@", NSStringFromClass(found.class));
+    [self applyStyleForMaterial:material];
+    [self writeInstallProbeWithHost:host background:bg material:material];
+}
+
+// 键盘完全稳定下来之后再做一次带外观信息的全树 dump。
+// 之前那些 dump 全是在动画中间抓的 (子视图尺寸都是 0), 看不出结构。
+- (void)scheduleStableTreeDump:(UIView *)host {
+    if (self.didDumpStableTree) return;
+    self.didDumpStableTree = YES;
+
+    __weak UIView *weakHost = host;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        UIView *strongHost = weakHost;
+        if (!strongHost || !strongHost.superview) return;
+
+        // 先做安全体检: 键盘还点得动吗?
+        [self runSafetyCheckOnHost:strongHost];
+
+        NSMutableString *out = [NSMutableString string];
+        [out appendFormat:@"==== [%@] 稳定态全树 (从宿主父视图起) ====\n", [NSDate date]];
+        NSInteger budget = 400;
+        KGDumpTreeDetail(strongHost.superview, 0, out, &budget);
+        [out appendFormat:@"==== [%@] 稳定态 宿主直接孩子 ====\n", [NSDate date]];
+        NSArray<UIView *> *subs = strongHost.subviews;
+        for (NSUInteger i = 0; i < subs.count; i++) {
+            UIView *sub = subs[i];
+            [out appendFormat:@"  #%lu %@ frame=%@ fg=%d a=%.2f h=%d\n",
+                (unsigned long)i, NSStringFromClass(sub.class), NSStringFromCGRect(sub.frame),
+                KGLooksLikeKeyboardForeground(sub), sub.alpha, sub.hidden];
+        }
+        [out appendString:@"====\n"];
+        KGWriteProbe(out);
+    });
+}
+
+// 安全体检 —— 本版最重要的一道保险。
+// 在键盘上取三个点做真实 hitTest: 如果三个点**全都**命中不到东西、
+// 或者全都命中我们自己的玻璃层, 就说明键盘已经被挡住、点不动了。
+// 这时立刻把玻璃层撤出宿主, 改挂到宿主父视图的最底层 (容器层, 绝不影响键盘),
+// 并且写进探针。宁可没效果, 也绝不能弄坏用户的键盘。
+- (void)runSafetyCheckOnHost:(UIView *)host {
+    if (self.didRunSafetyCheck) return;
+    self.didRunSafetyCheck = YES;
+    if (!host || !host.window || self.usingContainerFallback) return;
+    if (self.glassView.superview != host) return;
+
+    UIWindow *window = host.window;
+    NSArray<NSValue *> *samples = @[
+        [NSValue valueWithCGPoint:CGPointMake(CGRectGetMidX(host.bounds), CGRectGetMidY(host.bounds))],
+        [NSValue valueWithCGPoint:CGPointMake(host.bounds.size.width * 0.15, CGRectGetMidY(host.bounds))],
+        [NSValue valueWithCGPoint:CGPointMake(host.bounds.size.width * 0.85, host.bounds.size.height * 0.35)],
+    ];
+
+    NSUInteger blocked = 0;
+    NSMutableString *detail = [NSMutableString string];
+    for (NSValue *v in samples) {
+        CGPoint pt = [host convertPoint:v.CGPointValue toView:window];
+        UIView *hit = [window hitTest:pt withEvent:nil];
+        [detail appendFormat:@" (%@->%@)", NSStringFromCGPoint(pt),
+            hit ? NSStringFromClass(hit.class) : @"nil"];
+        if (!hit || hit == self.glassView || [hit isDescendantOfView:self.glassView]) blocked++;
+    }
+
+    if (blocked < samples.count) {
+        KGLog(@"安全体检通过 (3 点命中正常)");
+        return;
+    }
+
+    // 三点全部被挡 -> 键盘已经点不动了, 马上撤
+    UIView *container = host.superview;
+    KGWriteProbe([NSString stringWithFormat:
+        @"[SAFETY %@] 键盘被挡住, 玻璃层撤出宿主。命中情况:%@\n", [NSDate date], detail]);
+    [self.glassView removeFromSuperview];
+
+    if (container) {
+        // 改挂容器最底层: 在宿主之下, 永远不可能盖住按键
+        self.glassView.frame = host.frame;   // 与 host 同父视图, 坐标系一致
+        [container insertSubview:self.glassView atIndex:0];
+        self.usingContainerFallback = YES;
+        self.fallbackReferent = host;
+        self.hostView = nil;                 // 不再把宿主当归属, 免得又被搬回去
+        KGWriteProbe([NSString stringWithFormat:
+            @"[SAFETY %@] 已改挂到容器层 %@ index 0, glassFrame=%@\n",
+            [NSDate date], NSStringFromClass(container.class),
+            NSStringFromCGRect(self.glassView.frame)]);
+    } else {
+        self.glassView = nil;
+        self.hasAppliedStyle = NO;
+        KGWriteProbe([NSString stringWithFormat:@"[SAFETY %@] 容器不可用, 已彻底停用玻璃层\n", [NSDate date]]);
+    }
+}
+
+#pragma mark - 探测
+
+// 广度优先, 取面积最大的「可用」宿主
+- (UIView *)findInputSetHostIn:(UIView *)root {
+    UIView *best = nil;
+    CGFloat bestArea = 0;
+
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:root];
+    NSUInteger guard = 0;
+    while (queue.count > 0 && guard++ < 4000) {
+        UIView *current = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+
+        if (KGIsUsableHost(current)) {
+            CGRect f = current.frame;
+            CGFloat area = f.size.width * f.size.height;
+            if (area > bestArea) {
+                bestArea = area;
+                best = current;
+            }
+        }
+        [queue addObjectsFromArray:current.subviews];
+    }
+    return best;
+}
+
+// 在宿主的直接孩子里认「原生键盘背景层」。
+// 注意: 这**只**用于决定要不要隐藏它, 不再决定玻璃层插哪儿 (插哪儿只看按键前景)。
+- (UIView *)backgroundInHost:(UIView *)host {
+    CGRect hb = host.bounds;
+    CGFloat hostArea = hb.size.width * hb.size.height;
+    if (hostArea <= 0) return nil;
+
+    // 名字带 Backdrop 的最大者 —— 这个最可信
+    UIView *byName = nil;
+    CGFloat best = 0;
+    for (UIView *sub in host.subviews) {
+        if (sub == self.glassView) continue;
+        NSString *name = NSStringFromClass(sub.class);
+        if (![name containsString:@"Backdrop"]) continue;
+        CGFloat area = sub.frame.size.width * sub.frame.size.height;
+        if (area > best) { best = area; byName = sub; }
+    }
+    return byName;
+}
+
+#pragma mark - 安装与拆卸
+
+// 宿主的直接孩子里, 最靠上的那个「按键前景」。
+// 玻璃层必须待在它下面 —— 待在它上面会盖住整块键盘。
+- (UIView *)topmostForegroundInHost:(UIView *)host {
+    NSArray<UIView *> *subs = host.subviews;
+    for (NSInteger i = (NSInteger)subs.count - 1; i >= 0; i--) {
+        UIView *sub = subs[i];
+        if (sub == self.glassView) continue;
+        if (KGLooksLikeKeyboardForeground(sub)) return sub;
+    }
+    return nil;
+}
+
+- (void)placeGlassInHost:(UIView *)host {
+    if (!self.glassView) {
+        self.glassView = [[KGGlassView alloc] initWithFrame:host.bounds];
+        self.hasAppliedStyle = NO;
+    }
+    // 保险丝: 这一层是纯装饰, 任何情况下都不许拦触摸
+    self.glassView.userInteractionEnabled = NO;
+    self.glassView.multipleTouchEnabled = NO;
+    self.glassView.exclusiveTouch = NO;
+
+    if (!CGRectEqualToRect(self.glassView.frame, host.bounds)) {
+        self.glassView.frame = host.bounds;
+    }
+
+    if (self.glassView.superview != host) {
+        // 首次进场: 插到按键前景的下面; 找不到前景就插最底层 (index 0)
+        UIView *fg = [self topmostForegroundInHost:host];
+        NSInteger target = fg ? [host.subviews indexOfObject:fg] : 0;
+        [host insertSubview:self.glassView atIndex:(NSUInteger)MAX(0, target)];
+        self.nativeBackdrop = [self backgroundInHost:host];
+        self.nativeBackdropAlpha = self.nativeBackdrop ? self.nativeBackdrop.alpha : 1.0;
+        self.hasNativeBackdrop = (self.nativeBackdrop != nil);
+        return;
+    }
+
+    // 铁律 2: 已经在宿主里了, 平时绝不动它 —— 每次 insert 都会触发宿主重新布局,
+    // 而布局又会回调到这里, 形成死循环把键盘卡死。
+    // 只有一种情况必须纠正: 玻璃层被压到了按键前景的上面。
+    UIView *fg = [self topmostForegroundInHost:host];
+    if (!fg) return;
+    NSInteger gi = [host.subviews indexOfObject:self.glassView];
+    NSInteger fi = [host.subviews indexOfObject:fg];
+    if (gi != NSNotFound && fi != NSNotFound && gi > fi) {
+        KGLog(@"玻璃层被压到按键上面 (idx %ld > %ld), 纠正一次", (long)gi, (long)fi);
+        [host insertSubview:self.glassView atIndex:(NSUInteger)fi];
+    }
+}
+
+// 系统在键盘布局过程中可能会重设背景层外观, 每次布局都把我们要的状态补一遍 (幂等)
+- (void)enforceNativeBackdropState {
+    UIView *backdrop = self.nativeBackdrop;
+    if (!backdrop || !self.hasNativeBackdrop) return;
+    if (backdrop.superview == nil) return;
+    // 只有名字明确写着 Backdrop、且子树里没有按键内容的才敢藏。别的视图一律不动 ——
+    // 万一那其实是装着按键的容器, 藏掉它整块键盘就没了, 触摸也随之失效。
+    if (!KGIsSafeToHide(backdrop)) return;
+    backdrop.alpha = [KGPrefs hideNativeBackdrop] ? 0.0 : self.nativeBackdropAlpha;
+}
+
+- (void)applyStyleForMaterial:(KGMaterial)material {
+    BOOL dark = (self.glassView.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
+    KGStyle style = [KGPrefs styleForMaterial:material dark:dark];
+    BOOL outline = [KGPrefs showLayerOutline];
+    if (self.hasAppliedStyle && KGStyleEqual(style, self.appliedStyle)
+        && self.glassView.showOutline == outline) {
+        return;
+    }
+    self.appliedStyle = style;
+    self.hasAppliedStyle = YES;
+    self.glassView.showOutline = outline;
+    [self.glassView applyStyle:style];
+}
+
+- (void)writeInstallProbeWithHost:(UIView *)host background:(UIView *)bg material:(KGMaterial)material {
+    // 按「宿主 + 尺寸 + 背景 + 我们的 index」去重, 并限制条数。
+    // 上一版每次布局都写, 探针文件被刷到 0.7MB / 3000+ 行, 全是动画中间态噪音。
+    UIView *fg = [self topmostForegroundInHost:host];
+    NSInteger idx = [host.subviews indexOfObject:self.glassView];
+    NSInteger fgIdx = fg ? [host.subviews indexOfObject:fg] : NSNotFound;
+
+    NSString *signature = [NSString stringWithFormat:@"%@|%@|%@|%ld|%ld",
+        NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
+        bg ? NSStringFromClass(bg.class) : @"none", (long)idx, (long)fgIdx];
+    if ([signature isEqualToString:self.lastProbeSignature]) return;
+    self.lastProbeSignature = signature;
+    if (self.probeCount++ > 60) return;   // 上限, 防止探针再次失控
+
+    KGWriteProbe([NSString stringWithFormat:
+        @"[install %@] host=%@ hostFrame=%@ onScreen=%d bg=%@ fg=%@(idx %ld) glassIdx=%ld/%lu glassFrame=%@ hideNative=%d material=%ld blur=%.1f refraction=%.1f highlight=%.2f veil=%.2f radius=%.1f outline=%d\n",
+        [NSDate date],
+        NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
+        KGIsOnScreen(host),
+        bg ? NSStringFromClass(bg.class) : @"none",
+        fg ? NSStringFromClass(fg.class) : @"none", (long)fgIdx,
+        (long)idx, (unsigned long)host.subviews.count,
+        NSStringFromCGRect(self.glassView.frame),
+        [KGPrefs hideNativeBackdrop], (long)material,
+        self.appliedStyle.blur, self.appliedStyle.refraction,
+        self.appliedStyle.highlight, self.appliedStyle.veil,
+        self.appliedStyle.cornerRadius, [KGPrefs showLayerOutline]]);
+}
+
+- (void)restoreNativeBackdrop {
+    UIView *backdrop = self.nativeBackdrop;
+    if (backdrop && self.hasNativeBackdrop) {
+        backdrop.alpha = self.nativeBackdropAlpha;
+    }
+    self.nativeBackdrop = nil;
+    self.hasNativeBackdrop = NO;
+}
+
+- (void)teardown {
+    if (self.glassView) {
+        [self.glassView removeFromSuperview];
+        self.glassView = nil;
+        self.hasAppliedStyle = NO;
+    }
+    [self restoreNativeBackdrop];
+    self.hostView = nil;
+}
+
+#pragma mark - 兜底路径 (宿主类名不认识时)
+
+// 类名候选 (兜底路径用)。不同 iOS 版本用的私有类不同, 全部收进来 ——
+// 命中哪个用哪个。
+static NSArray<NSString *> *KGBackdropClassHints(void) {
+    static NSArray *hints = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        hints = @[ @"InputBackdrop", @"KeyboardBackdrop", @"UIKBBackdropView" ];
+    });
+    return hints;
 }
 
 - (UIView *)findBackdropByNameIn:(UIView *)root {
@@ -297,256 +617,40 @@ static NSArray<NSString *> *KGBackdropClassHints(void) {
     return best;
 }
 
-// 第三方输入法扩展: 目前只做记录, 结构拿到之后再对准 hook
-- (void)handleExtensionLayout:(UIView *)root {
-    if (!root) return;
-    [KGPrefs debugLog];
-    KGDumpTreeOnce(root, @"输入法扩展");
+- (void)legacyRefreshWithRoot:(UIView *)root {
+    if (self.glassView.superview != nil) return;   // 已经装好了, 别乱动
 
-    UIView *host = [self findInputSetHostIn:root];
-    if (host) [self refreshWithHost:host];
-}
-
-#pragma mark - 主流程
-
-- (void)refreshWithHost:(UIView *)host {
-    [KGPrefs debugLog];
-
-    KGMaterial material = [KGPrefs material];
-    if (material == KGMaterialOff) {
-        [self teardown];
+    UIView *found = [self findBackdropByNameIn:root];
+    if (!found) {
+        KGLog(@"兜底也未找到背板 (root=%@)", NSStringFromClass(root.class));
         return;
     }
+    if (!KGIsKeyboardSized(found) || !KGIsOnScreen(found)) return;
 
-    // 键盘收起时宿主还在树里, 但尺寸会缩到 0 或很小。这时把玻璃层藏起来 ——
-    // 不藏的话它会顶着一整块键盘大小的 frame 悬在已经收起的键盘位置上。
-    if (!KGIsKeyboardSized(host)) {
-        self.glassView.hidden = YES;
-        return;
+    UIView *host = found.superview;
+    if (!host) return;
+
+    KGLog(@"兜底路径命中背板 %@", NSStringFromClass(found.class));
+    if (!self.glassView) {
+        self.glassView = [[KGGlassView alloc] initWithFrame:found.frame];
+        self.hasAppliedStyle = NO;
     }
+    self.glassView.userInteractionEnabled = NO;
+    self.glassView.frame = found.frame;
 
-    BOOL hostChanged = (self.hostView != host);
-    if (hostChanged) {
-        KGLog(@"宿主切换 -> %@ frame=%@", NSStringFromClass(host.class),
-              NSStringFromCGRect(host.frame));
-        // 换宿主了: 先把旧宿主上的东西清干净再装
-        [self restoreNativeBackdrop];
-        [self.glassView removeFromSuperview];
-        self.hostView = host;
-        KGDumpHostChildrenOnce(host, @"系统键盘");
-    }
-
-    UIView *bg = [self backgroundInHost:host];
-    if (!bg) KGDumpHostChildrenOnce(host, @"系统键盘(未认出背景层)");
-
-    // 认不出背景层时, 退到宿主最底层 —— 至少不会盖住按键, 但很可能被
-    // 原生背景挡住。探针里会写 bg=none, 便于下一轮定位。
-    [self installOnHost:host background:bg];
+    UIView *fg = [self topmostForegroundInHost:host];
+    NSInteger target = 0;
+    if (fg && fg != found) target = [host.subviews indexOfObject:fg];
+    [host insertSubview:self.glassView atIndex:(NSUInteger)MAX(0, target)];
     self.glassView.hidden = NO;
 
+    self.hostView = host;
+    self.nativeBackdrop = found;
+    self.nativeBackdropAlpha = found.alpha;
+    self.hasNativeBackdrop = YES;
+
     [self enforceNativeBackdropState];
-    [self applyStyleForMaterial:material];
-    [self writeInstallProbeWithHost:host background:bg material:material];
-}
-
-#pragma mark - 探测
-
-// 广度优先, 取面积最大的 UIInputSetHostView (可能有多个, 键盘本体最大)
-- (UIView *)findInputSetHostIn:(UIView *)root {
-    UIView *best = nil;
-    CGFloat bestArea = 0;
-
-    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:root];
-    NSUInteger guard = 0;
-    while (queue.count > 0 && guard++ < 4000) {
-        UIView *current = queue.firstObject;
-        [queue removeObjectAtIndex:0];
-
-        if (KGClassIsInputSetHost(current)) {
-            CGRect f = current.frame;
-            CGFloat area = f.size.width * f.size.height;
-            if (area > bestArea) {
-                bestArea = area;
-                best = current;
-            }
-        }
-        [queue addObjectsFromArray:current.subviews];
-    }
-    return best;
-}
-
-// 在宿主的孩子里认原生键盘背景层。
-// 规则: 铺满宿主 75% 以上 (且高过 100pt) 的视图里, 优先挑名字带 Backdrop 的;
-//      名字里带 Backdrop 的不是前景, 所以挑它一定安全。
-//      其次挑第一个「不像按键前景」的; 若全都是前景, 就不认背景 (返回 nil)。
-- (UIView *)backgroundInHost:(UIView *)host {
-    CGRect hb = host.bounds;
-    CGFloat hostArea = hb.size.width * hb.size.height;
-    if (hostArea <= 0) return nil;
-
-    NSMutableArray<UIView *> *covers = [NSMutableArray array];
-    for (UIView *sub in host.subviews) {
-        if (sub == self.glassView) continue;
-        CGRect f = sub.frame;
-        CGFloat area = f.size.width * f.size.height;
-        if (area >= hostArea * 0.75 && f.size.height >= 100.0) {
-            [covers addObject:sub];
-        }
-    }
-
-    // 1) 铺满的那几个里, 名字带 Backdrop 的
-    for (UIView *sub in covers) {
-        NSString *name = NSStringFromClass(sub.class);
-        if ([name containsString:@"Backdrop"]) return sub;
-    }
-    // 2) 铺满的那几个里, 第一个不是按键前景的
-    for (UIView *sub in covers) {
-        if (!KGLooksLikeKeyboardForeground(sub)) return sub;
-    }
-    // 3) 整棵孩子里名字带 Backdrop 的最大者 (不要求铺满)
-    UIView *byName = nil;
-    CGFloat best = 0;
-    for (UIView *sub in host.subviews) {
-        if (sub == self.glassView) continue;
-        NSString *name = NSStringFromClass(sub.class);
-        if (![name containsString:@"Backdrop"]) continue;
-        CGFloat area = sub.frame.size.width * sub.frame.size.height;
-        if (area > best) { best = area; byName = sub; }
-    }
-    if (byName) return byName;
-
-    // 4) 兜底: 只有「不像前景」的第一个孩子才敢当背景
-    for (UIView *sub in host.subviews) {
-        if (sub == self.glassView) continue;
-        if (!KGLooksLikeKeyboardForeground(sub)) return sub;
-    }
-    return nil;
-}
-
-#pragma mark - 安装与拆卸
-
-// 宿主的直接孩子里, 最靠上的那个「按键前景」。
-// 玻璃层必须插到它下面 —— 插到上面就会盖住整块键盘 (v0.2.0 的教训)。
-- (UIView *)topmostForegroundInHost:(UIView *)host {
-    NSArray<UIView *> *subs = host.subviews;
-    for (NSInteger i = (NSInteger)subs.count - 1; i >= 0; i--) {
-        UIView *sub = subs[i];
-        if (sub == self.glassView) continue;
-        if (KGLooksLikeKeyboardForeground(sub)) return sub;
-    }
-    return nil;
-}
-
-- (void)installOnHost:(UIView *)host background:(UIView *)bg {
-    if (!self.glassView) {
-        self.glassView = [[KGGlassView alloc] initWithFrame:host.bounds];
-        self.hasAppliedStyle = NO;
-    }
-    // 保险丝: 这一层是纯装饰, 任何情况下都不许拦触摸
-    self.glassView.userInteractionEnabled = NO;
-    self.glassView.multipleTouchEnabled = NO;
-    self.glassView.exclusiveTouch = NO;
-
-    if (!CGRectEqualToRect(self.glassView.frame, host.bounds)) {
-        self.glassView.frame = host.bounds;
-    }
-
-    // 背景层换了才重建引用, 免得把用户的 alpha 反复覆盖成 0
-    if (bg && bg.superview == host && self.nativeBackdrop != bg) {
-        [self restoreNativeBackdrop];
-        self.nativeBackdrop = bg;
-        self.nativeBackdropAlpha = bg.alpha;
-        self.hasNativeBackdrop = YES;
-    }
-
-    // 位置目标: 紧贴在按键前景的下面。这样不管宿主里 [背景,前景] 还是
-    // [前景,背景] 哪种顺序, 玻璃层都在按键之下 —— 按键永远可点、可见。
-    //   找得到前景 -> 插到它的 index (它自己会往后挪一位, 正好压在玻璃上)
-    //   找不到前景 -> 插到 index 0 (最底层), 宁可看不见也绝不盖按键
-    UIView *fg = [self topmostForegroundInHost:host];
-    NSInteger target;
-    if (fg) {
-        target = [host.subviews indexOfObject:fg];
-        NSInteger cur = [host.subviews indexOfObject:self.glassView];
-        if (cur != NSNotFound && cur < target) target--;   // 先移除自己会左移
-    } else {
-        target = 0;
-    }
-
-    NSInteger curIdx = [host.subviews indexOfObject:self.glassView];
-    BOOL placedRight = (self.glassView.superview == host) && (curIdx == target);
-    if (!placedRight) {
-        [host insertSubview:self.glassView atIndex:(NSUInteger)MAX(0, target)];
-    }
-}
-
-// 系统在键盘布局过程中可能会重设背景层外观, 每次布局都把我们要的状态补一遍 (幂等)
-- (void)enforceNativeBackdropState {
-    UIView *backdrop = self.nativeBackdrop;
-    if (!backdrop || !self.hasNativeBackdrop) return;
-    if (backdrop.superview == nil) return;
-    // 只有名字明确写着 Backdrop 的才敢藏。别的视图 (哪怕长得像背景) 一律不动 ——
-    // 万一那其实是装着按键的容器, 藏掉它整块键盘就没了, 触摸也随之失效。
-    if (!KGIsSafeToHide(backdrop)) return;
-    backdrop.alpha = [KGPrefs hideNativeBackdrop] ? 0.0 : self.nativeBackdropAlpha;
-}
-
-- (void)applyStyleForMaterial:(KGMaterial)material {
-    BOOL dark = (self.glassView.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
-    KGStyle style = [KGPrefs styleForMaterial:material dark:dark];
-    BOOL outline = [KGPrefs showLayerOutline];
-    if (self.hasAppliedStyle && KGStyleEqual(style, self.appliedStyle)
-        && self.glassView.showOutline == outline) {
-        return;
-    }
-    self.appliedStyle = style;
-    self.hasAppliedStyle = YES;
-    self.glassView.showOutline = outline;
-    [self.glassView applyStyle:style];
-}
-
-- (void)writeInstallProbeWithHost:(UIView *)host background:(UIView *)bg material:(KGMaterial)material {
-    static CGRect lastLogged = {0};
-    static NSUInteger logged = 0;
-    if (logged > 0 && CGRectEqualToRect(lastLogged, self.glassView.frame)) return;
-    lastLogged = self.glassView.frame;
-    logged++;
-
-    UIView *fg = [self topmostForegroundInHost:host];
-    NSInteger idx = [host.subviews indexOfObject:self.glassView];
-    NSInteger fgIdx = fg ? [host.subviews indexOfObject:fg] : NSNotFound;
-
-    KGWriteProbe([NSString stringWithFormat:
-        @"[install %@] host=%@ hostFrame=%@ bg=%@ fg=%@(idx %ld) glassIdx=%ld/%lu glassFrame=%@ hideNative=%d material=%ld blur=%.1f refraction=%.1f highlight=%.2f veil=%.2f radius=%.1f outline=%d\n",
-        [NSDate date],
-        NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
-        bg ? NSStringFromClass(bg.class) : @"none",
-        fg ? NSStringFromClass(fg.class) : @"none", (long)fgIdx,
-        (long)idx, (unsigned long)host.subviews.count,
-        NSStringFromCGRect(self.glassView.frame),
-        [KGPrefs hideNativeBackdrop], (long)material,
-        self.appliedStyle.blur, self.appliedStyle.refraction,
-        self.appliedStyle.highlight, self.appliedStyle.veil,
-        self.appliedStyle.cornerRadius, [KGPrefs showLayerOutline]]);
-}
-
-- (void)restoreNativeBackdrop {
-    UIView *backdrop = self.nativeBackdrop;
-    if (backdrop && self.hasNativeBackdrop) {
-        backdrop.alpha = self.nativeBackdropAlpha;
-    }
-    self.nativeBackdrop = nil;
-    self.hasNativeBackdrop = NO;
-}
-
-- (void)teardown {
-    if (self.glassView) {
-        [self.glassView removeFromSuperview];
-        self.glassView = nil;
-        self.hasAppliedStyle = NO;
-    }
-    [self restoreNativeBackdrop];
-    self.hostView = nil;
+    [self applyStyleForMaterial:[KGPrefs material]];
 }
 
 @end
