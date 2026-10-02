@@ -123,9 +123,17 @@ static UIBezierPath *KGMakeTopRingPath(CGRect bounds, CGFloat radius, CGFloat ri
 
     // ---- 2. 底色 (veil): 深色压黑, 浅色提白 ----
     self.veilLayer.frame = bounds;
-    UIColor *veilColor = dark ? [UIColor blackColor] : [UIColor whiteColor];
-    CGFloat veilAlpha = style.veil * 0.65;
-    self.veilLayer.backgroundColor = [veilColor colorWithAlphaComponent:veilAlpha].CGColor;
+    if (self.showOutline) {
+        // 调试描边: 位置对不对只看这个, 跟材质参数无关
+        self.layer.borderWidth = 3.0;
+        self.layer.borderColor = [UIColor colorWithRed:0.0 green:0.85 blue:1.0 alpha:1.0].CGColor;
+        self.veilLayer.backgroundColor = [UIColor colorWithRed:1.0 green:0.0 blue:1.0 alpha:0.30].CGColor;
+    } else {
+        self.layer.borderWidth = 0.0;
+        UIColor *veilColor = dark ? [UIColor blackColor] : [UIColor whiteColor];
+        CGFloat veilAlpha = style.veil * 0.65;
+        self.veilLayer.backgroundColor = [veilColor colorWithAlphaComponent:veilAlpha].CGColor;
+    }
 
     // ---- 3. 折射: 放大后的边缘环 ----
     CGFloat refraction = style.refraction;

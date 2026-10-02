@@ -12,6 +12,10 @@
 
 @property (nonatomic, assign) KGStyle style;
 
+// 调试: 画一圈青色边框 + 半透明品红填充。
+// 用来一眼确认「层装上没有、位置尺寸对不对」, 比反复调参数猜快得多。
+@property (nonatomic, assign) BOOL showOutline;
+
 - (void)applyStyle:(KGStyle)style;
 
 @end

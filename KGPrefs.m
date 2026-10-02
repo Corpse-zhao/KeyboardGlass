@@ -3,14 +3,20 @@
 
 NSString * const KGPrefsSuiteName = @"com.banli.keyboardglass.preferences";
 
-// 参数默认值 —— 起点参考自 GlassSuiteX 的实际默认 (模糊 5 / 折射 9 / 高光 0.51 / 底色 0)
-static const CGFloat kKGDefaultBlur         = 5.0;
-static const CGFloat kKGDefaultRefraction   = 9.0;
-static const CGFloat kKGDefaultHighlight    = 0.51;
-static const CGFloat kKGDefaultVeil         = 0.0;
+// 参数默认值。
+// 早期版本取的是 GlassSuiteX 的默认 (模糊 5 / 折射 9 / 高光 0.51 / 底色 0),
+// 但那是给「通知横幅」调的 —— 键盘底下是整块 App 内容, 那组数值放在键盘上
+// 几乎等于全透明, 用户完全看不出装了插件。这里换成在键盘上肉眼可辨的一组。
+static const CGFloat kKGDefaultBlur         = 12.0;
+static const CGFloat kKGDefaultRefraction   = 10.0;
+static const CGFloat kKGDefaultHighlight    = 0.65;
+static const CGFloat kKGDefaultVeil         = 0.30;
 // 默认 0: 先不做圆角。圆角会让键盘四角露出下层内容, 而原生背板仍是直角,
 // 两者叠加反而难看 —— 等基础材质确认无误后再作为第二步开启。
 static const CGFloat kKGDefaultCornerRadius = 0.0;
+
+// 参数版本号。1 = 早期那组不可见的默认值; 2 = 现在这组。
+static const NSInteger kKGParamsVersion = 2;
 
 static BOOL kKGDebugEnabled = NO;
 
@@ -43,13 +49,41 @@ void KGLog(NSString *format, ...) {
         @"LiquidHighlight":    @(kKGDefaultHighlight),
         @"LiquidVeil":         @(kKGDefaultVeil),
         @"CornerRadius":       @(kKGDefaultCornerRadius),
-        // 默认 NO: 原生背板的模糊是系统自己实现的、一定工作; 先把它留着,
-        // 我们的层只做「材质增强」(高光轮廓 / 底色 / 折射环), 效果确定可见。
-        // 想更通透再打开这个开关, 那时才依赖自建 CABackdropLayer 的采样。
-        @"HideNativeBackdrop": @NO,
+        // 默认 YES: 玻璃层插在原生背板的上一层, 藏着它的话玻璃只会采到
+        // 那块背板本身, 模糊等于没做。想让玻璃真采到键盘下方的画面就得让位。
+        @"HideNativeBackdrop": @YES,
         @"DebugLog":           @NO,
+        @"ShowLayerOutline":   @NO,
     }];
     kKGDebugEnabled = [[self defaults] boolForKey:@"DebugLog"];
+    [self runParamsMigrationIfNeeded];
+}
+
+// 只跑一次: 把「老默认值 = 用户从没动过的存档」升级成肉眼可见的一组。
+// 判据是 ParamsVersion 而不是参数内容 —— 用户后来自己拖到 0 是有意为之,
+// 不能再被我们覆盖回去。
++ (BOOL)needsParamsMigration {
+    return [[self defaults] integerForKey:@"ParamsVersion"] < kKGParamsVersion;
+}
+
++ (void)writeRecommendedParams {
+    NSUserDefaults *d = [self defaults];
+    [d setObject:@(kKGParamsVersion)     forKey:@"ParamsVersion"];
+    [d setObject:@(kKGDefaultBlur)       forKey:@"LiquidBlur"];
+    [d setObject:@(kKGDefaultRefraction) forKey:@"LiquidRefraction"];
+    [d setObject:@(kKGDefaultHighlight)  forKey:@"LiquidHighlight"];
+    [d setObject:@(kKGDefaultVeil)       forKey:@"LiquidVeil"];
+    [d setObject:@(kKGDefaultCornerRadius) forKey:@"CornerRadius"];
+    [d setObject:@YES                    forKey:@"HideNativeBackdrop"];
+    [d synchronize];
+}
+
++ (void)runParamsMigrationIfNeeded {
+    if (![self needsParamsMigration]) return;
+    [self writeRecommendedParams];
+    KGLog(@"参数已迁移到 v%ld: blur=%.1f refraction=%.1f highlight=%.2f veil=%.2f",
+          (long)kKGParamsVersion, kKGDefaultBlur, kKGDefaultRefraction,
+          kKGDefaultHighlight, kKGDefaultVeil);
 }
 
 + (KGMaterial)material {
@@ -76,13 +110,23 @@ void KGLog(NSString *format, ...) {
             s.blur = 14.0; s.refraction = 0.0;  s.highlight = 0.35; s.veil = 0.22;
             break;
         case KGMaterialLiquid:
-        default:
-            // 液态玻璃: 全部走用户自定义参数
-            s.blur         = [d objectForKey:@"LiquidBlur"] ? [d doubleForKey:@"LiquidBlur"] : kKGDefaultBlur;
-            s.refraction   = [d objectForKey:@"LiquidRefraction"] ? [d doubleForKey:@"LiquidRefraction"] : kKGDefaultRefraction;
-            s.highlight    = [d objectForKey:@"LiquidHighlight"] ? [d doubleForKey:@"LiquidHighlight"] : kKGDefaultHighlight;
-            s.veil         = [d objectForKey:@"LiquidVeil"] ? [d doubleForKey:@"LiquidVeil"] : kKGDefaultVeil;
+        default: {
+            // 液态玻璃: 全部走用户自定义参数。
+            // 存档还没迁移过的话, 里面是早期那组「几乎全透明」的旧默认值 ——
+            // 这时先按推荐值渲染, 免得用户以为插件没装成功。
+            if ([self needsParamsMigration]) {
+                s.blur       = kKGDefaultBlur;
+                s.refraction = kKGDefaultRefraction;
+                s.highlight  = kKGDefaultHighlight;
+                s.veil       = kKGDefaultVeil;
+            } else {
+                s.blur       = [d objectForKey:@"LiquidBlur"]       ? [d doubleForKey:@"LiquidBlur"]       : kKGDefaultBlur;
+                s.refraction = [d objectForKey:@"LiquidRefraction"] ? [d doubleForKey:@"LiquidRefraction"] : kKGDefaultRefraction;
+                s.highlight  = [d objectForKey:@"LiquidHighlight"]  ? [d doubleForKey:@"LiquidHighlight"]  : kKGDefaultHighlight;
+                s.veil       = [d objectForKey:@"LiquidVeil"]       ? [d doubleForKey:@"LiquidVeil"]       : kKGDefaultVeil;
+            }
             break;
+        }
     }
 
     s.cornerRadius = [d objectForKey:@"CornerRadius"] ? [d doubleForKey:@"CornerRadius"] : kKGDefaultCornerRadius;
@@ -120,6 +164,10 @@ void KGLog(NSString *format, ...) {
     NSUserDefaults *d = [self defaults];
     if ([d objectForKey:@"HideNativeBackdrop"] == nil) return NO;
     return [d boolForKey:@"HideNativeBackdrop"];
+}
+
++ (BOOL)showLayerOutline {
+    return [[self defaults] boolForKey:@"ShowLayerOutline"];
 }
 
 + (BOOL)debugLog {

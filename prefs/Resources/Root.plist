@@ -13,7 +13,7 @@
 			<key>label</key>
 			<string>键盘液态玻璃</string>
 			<key>footerText</key>
-			<string>给系统键盘的背板换上 iOS 26 风格的玻璃材质。改完切换一次键盘即可看到效果。</string>
+			<string>给系统键盘的背板换上 iOS 26 风格的玻璃材质。改完切一次键盘（或收起再弹出）即可看到效果。</string>
 		</dict>
 
 		<dict>
@@ -89,7 +89,7 @@
 			<key>key</key>
 			<string>LiquidBlur</string>
 			<key>default</key>
-			<real>5</real>
+			<real>12</real>
 			<key>min</key>
 			<real>0</real>
 			<key>max</key>
@@ -116,7 +116,7 @@
 			<key>key</key>
 			<string>LiquidRefraction</string>
 			<key>default</key>
-			<real>9</real>
+			<real>10</real>
 			<key>min</key>
 			<real>0</real>
 			<key>max</key>
@@ -143,7 +143,7 @@
 			<key>key</key>
 			<string>LiquidHighlight</string>
 			<key>default</key>
-			<real>0.51</real>
+			<real>0.65</real>
 			<key>min</key>
 			<real>0</real>
 			<key>max</key>
@@ -170,7 +170,7 @@
 			<key>key</key>
 			<string>LiquidVeil</string>
 			<key>default</key>
-			<real>0</real>
+			<real>0.3</real>
 			<key>min</key>
 			<real>0</real>
 			<key>max</key>
@@ -206,7 +206,7 @@
 			<key>key</key>
 			<string>CornerRadius</string>
 			<key>default</key>
-			<real>12</real>
+			<real>0</real>
 			<key>min</key>
 			<real>0</real>
 			<key>max</key>
@@ -249,7 +249,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>隐藏系统原有的背板，玻璃层才能采到键盘下方的画面。键盘看起来缺色就把它关掉。</string>
+			<string>隐藏系统原有的键盘背景，玻璃层才能采到键盘下方的画面、模糊才有意义。键盘看起来缺色或者太透就把它关掉——关掉后玻璃层依然可见，只是模糊会失去参照。</string>
 		</dict>
 
 		<dict>
@@ -278,6 +278,30 @@
 
 		<dict>
 			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>显示玻璃层边框</string>
+			<key>key</key>
+			<string>ShowLayerOutline</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.banli.keyboardglass.preferences</string>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>打开后键盘上会出现一圈青色边框、里面铺半透明品红。它跟材质参数无关：只要边框出现，就说明玻璃层已经装在键盘上、尺寸位置也正确，剩下的只是调参数。看不到边框就说明层没装上，回传探针文件继续查。</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
 			<string>PSGroupCell</string>
 		</dict>
 
@@ -294,7 +318,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>板栗仁 · KeyboardGlass 0.1.0</string>
+			<string>板栗仁 · KeyboardGlass 0.2.0</string>
 		</dict>
 
 	</array>

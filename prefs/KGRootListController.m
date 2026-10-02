@@ -15,6 +15,33 @@ static void KGProbe(NSString *msg) {
     NSLog(@"[KeyboardGlass][prefs] %@", msg);
 }
 
+// 参数版本号。1 = 早期那组「在键盘上几乎全透明」的默认值, 2 = 现在这组。
+// 必须和 KGPrefs.m 里的 kKGParamsVersion 保持一致。
+static const NSInteger kKGParamsVersion = 2;
+static const double kKGRecommendedBlur       = 12.0;
+static const double kKGRecommendedRefraction = 10.0;
+static const double kKGRecommendedHighlight  = 0.65;
+static const double kKGRecommendedVeil       = 0.30;
+
+// 早期版本的默认值在键盘上完全看不出效果, 用户会以为插件没装成功。
+// 这里在「设置」进程里做一次迁移 —— 这个进程不沙盒, 写进去的位置插件
+// 一定读得到。判据是版本号而不是参数内容: 用户后来自己拖到 0 是有意的,
+// 不能再被覆盖回去。
+static void KGMigrateParamsIfNeeded(NSUserDefaults *defaults) {
+    if ([defaults integerForKey:@"ParamsVersion"] >= kKGParamsVersion) return;
+
+    NSInteger old = [defaults integerForKey:@"ParamsVersion"];
+    [defaults setObject:@(kKGParamsVersion)         forKey:@"ParamsVersion"];
+    [defaults setObject:@(kKGRecommendedBlur)       forKey:@"LiquidBlur"];
+    [defaults setObject:@(kKGRecommendedRefraction) forKey:@"LiquidRefraction"];
+    [defaults setObject:@(kKGRecommendedHighlight)  forKey:@"LiquidHighlight"];
+    [defaults setObject:@(kKGRecommendedVeil)       forKey:@"LiquidVeil"];
+    [defaults setObject:@YES                        forKey:@"HideNativeBackdrop"];
+    [defaults synchronize];
+    KGProbe([NSString stringWithFormat:@"[migrate] 参数版本 %ld -> %ld, 已写入推荐值",
+             (long)old, (long)kKGParamsVersion]);
+}
+
 @implementation KGRootListController
 
 + (void)load {
@@ -31,6 +58,9 @@ static void KGProbe(NSString *msg) {
 
 - (NSArray *)specifiers {
     if (!_specifiers) {
+        // 先迁移再读 plist, 否则滑块会按旧值显示
+        KGMigrateParamsIfNeeded([[NSUserDefaults alloc] initWithSuiteName:kKGPrefsDomain]);
+
         NSArray *all = nil;
         @try {
             all = [self loadSpecifiersFromPlistName:@"Root" target:self];
@@ -70,14 +100,18 @@ static void KGProbe(NSString *msg) {
     }
 }
 
-// 「恢复本页默认设置」按钮: 只清掉液态玻璃那四个自定义参数与圆角, 保留开关与档位
+// 「恢复本页默认设置」按钮: 把参数写回推荐值, 保留启用开关与档位
 - (void)resetPage:(PSSpecifier *)specifier {
     NSUserDefaults *defaults = [[NSUserDefaults alloc] initWithSuiteName:kKGPrefsDomain];
-    for (NSString *key in @[ @"LiquidBlur", @"LiquidRefraction", @"LiquidHighlight",
-                             @"LiquidVeil", @"CornerRadius" ]) {
-        [defaults removeObjectForKey:key];
-    }
+    [defaults setObject:@(kKGParamsVersion)         forKey:@"ParamsVersion"];
+    [defaults setObject:@(kKGRecommendedBlur)       forKey:@"LiquidBlur"];
+    [defaults setObject:@(kKGRecommendedRefraction) forKey:@"LiquidRefraction"];
+    [defaults setObject:@(kKGRecommendedHighlight)  forKey:@"LiquidHighlight"];
+    [defaults setObject:@(kKGRecommendedVeil)       forKey:@"LiquidVeil"];
+    [defaults setObject:@0                          forKey:@"CornerRadius"];
+    [defaults setObject:@YES                        forKey:@"HideNativeBackdrop"];
     [defaults synchronize];
+    KGProbe(@"[reset] 已恢复推荐参数");
     _specifiers = nil;
     [self reloadSpecifiers];
 }

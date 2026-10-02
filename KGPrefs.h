@@ -37,6 +37,19 @@ extern NSString * const KGPrefsSuiteName;
 + (BOOL)hideNativeBackdrop;
 + (BOOL)debugLog;
 
+// 调试: 在玻璃层四周画一圈青色边框、内部铺半透明品红。
+// 用来一眼确认「层到底装上了没有、位置尺寸对不对」—— 比调参数猜要快得多。
++ (BOOL)showLayerOutline;
+
+// 一次性参数迁移: 早期版本的默认值 (blur 5 / veil 0) 几乎完全不可见,
+// 用户点不出效果就会以为插件没生效。这里只迁移一次, 迁移后用户自己的
+// 调整不会再被覆盖。
++ (BOOL)needsParamsMigration;
++ (void)runParamsMigrationIfNeeded;
+
+// 推荐参数: 在键盘上肉眼可辨的一组值
++ (void)writeRecommendedParams;
+
 @end
 
 // 统一的日志出口: 调试开关打开时走 NSLog, 否则静默
