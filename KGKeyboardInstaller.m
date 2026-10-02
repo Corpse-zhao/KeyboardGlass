@@ -138,6 +138,17 @@ static void KGDumpHostChildrenOnce(UIView *host, NSString *tag) {
     KGWriteProbe(out);
 }
 
+// 类名候选 (兜底路径用)。不同 iOS 版本用的私有类不同, 全部收进来 ——
+// 命中哪个用哪个。
+static NSArray<NSString *> *KGBackdropClassHints(void) {
+    static NSArray *hints = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        hints = @[ @"InputBackdrop", @"KeyboardBackdrop", @"UIKBBackdropView" ];
+    });
+    return hints;
+}
+
 #pragma mark -
 
 @interface KGKeyboardInstaller ()
@@ -177,11 +188,85 @@ static void KGDumpHostChildrenOnce(UIView *host, NSString *tag) {
     [KGPrefs debugLog];
 
     UIView *host = [self findInputSetHostIn:root];
-    if (!host) {
-        KGDumpTreeOnce(root, @"容器(未找到宿主)");
+    if (host) {
+        [self refreshWithHost:host];
         return;
     }
-    [self refreshWithHost:host];
+
+    // 万一某些 iOS 版本里宿主视图不叫 InputSetHost*: 退回上一版的老路子 ——
+    // 按背板类名在全树里找面积最大的那块, 装到它父视图上。宁可两条路都留着,
+    // 也不要出现「换了锚点反而彻底找不到」这种退化。
+    KGDumpTreeOnce(root, @"容器(未找到宿主, 走背板兜底)");
+    [self legacyRefreshWithRoot:root];
+}
+
+// 老路子 (v0.1.0 的做法): 类名找背板 + 面积择优。只作为兜底。
+- (void)legacyRefreshWithRoot:(UIView *)root {
+    UIView *found = [self findBackdropByNameIn:root];
+    if (!found) {
+        KGLog(@"兜底也未找到背板 (root=%@)", NSStringFromClass(root.class));
+        return;
+    }
+    if (!KGIsKeyboardSized(found)) {
+        KGLog(@"忽略小背板 %@ frame=%@", NSStringFromClass(found.class), NSStringFromCGRect(found.frame));
+        return;
+    }
+    if (self.glassView && self.glassView.superview == found.superview
+        && self.nativeBackdrop == found) {
+        [self enforceNativeBackdropState];
+        [self applyStyleForMaterial:[KGPrefs material]];
+        return;
+    }
+
+    UIView *host = found.superview;
+    if (!host) return;
+
+    [self restoreNativeBackdrop];
+    if (!self.glassView) {
+        self.glassView = [[KGGlassView alloc] initWithFrame:found.frame];
+        self.hasAppliedStyle = NO;
+    }
+    self.glassView.frame = found.frame;
+    [host insertSubview:self.glassView aboveSubview:found];
+    self.glassView.hidden = NO;
+
+    self.hostView = host;
+    self.nativeBackdrop = found;
+    self.nativeBackdropAlpha = found.alpha;
+    self.hasNativeBackdrop = YES;
+
+    [self enforceNativeBackdropState];
+    [self applyStyleForMaterial:[KGPrefs material]];
+    [self writeInstallProbeWithHost:host background:found material:[KGPrefs material]];
+    KGLog(@"兜底路径命中背板 %@", NSStringFromClass(found.class));
+}
+
+- (UIView *)findBackdropByNameIn:(UIView *)root {
+    UIView *best = nil;
+    CGFloat bestArea = 0;
+
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:root];
+    NSUInteger guard = 0;
+    while (queue.count > 0 && guard++ < 4000) {
+        UIView *current = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+
+        if (current != self.glassView) {
+            NSString *name = NSStringFromClass(current.class);
+            for (NSString *hint in KGBackdropClassHints()) {
+                if (![name containsString:hint]) continue;
+                CGRect f = current.frame;
+                CGFloat area = f.size.width * f.size.height;
+                if (area > bestArea) {
+                    bestArea = area;
+                    best = current;
+                }
+                break;
+            }
+        }
+        [queue addObjectsFromArray:current.subviews];
+    }
+    return best;
 }
 
 // 第三方输入法扩展: 目前只做记录, 结构拿到之后再对准 hook
