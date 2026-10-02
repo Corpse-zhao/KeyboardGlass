@@ -26,6 +26,18 @@ static BOOL KGViewLooksLikeBackdrop(UIView *view) {
     return NO;
 }
 
+// 主背板资格: 键盘高度至少要有 150pt。
+// 键盘切换动画途中主背板会暂时离树, 此时面积择优会选中候选栏里的
+// 小背板 (如 44x44 的 TUICandidateBackdropView) —— 玻璃层一旦搬过去
+// 就再也回不来, 表现为「完全不生效」。小背板一律无视。
+static BOOL KGIsMainBackdrop(UIView *view) {
+    if (!view || !view.window) return NO;
+    CGRect frame = view.frame;
+    CGFloat screenWidth = view.window.bounds.size.width;
+    if (screenWidth <= 0) return NO;
+    return (frame.size.width * frame.size.height) >= screenWidth * 150.0;
+}
+
 static BOOL KGStyleEqual(KGStyle a, KGStyle b) {
     return a.blur == b.blur
         && a.refraction == b.refraction
@@ -118,9 +130,11 @@ static void KGDumpTreeOnce(UIView *root, NSString *tag) {
         return;
     }
 
-    // 已安装且背板还活着: 只做轻量同步, 不重复遍历视图树
+    // 已安装且装在合格的主背板上: 只做轻量同步, 不重复遍历视图树。
+    // 注意必须校验当前背板是主背板 —— 否则玻璃层卡在小背板里就永远出不来了
     UIView *backdrop = self.nativeBackdrop;
-    if (self.glassView && self.glassView.superview && backdrop && backdrop.superview) {
+    BOOL installedOnMain = (backdrop && KGIsMainBackdrop(backdrop));
+    if (self.glassView && self.glassView.superview && installedOnMain && backdrop.superview) {
         [self syncGeometryWithBackdrop:backdrop];
         [self enforceNativeBackdropState];
         [self applyStyleForMaterial:material];
@@ -131,6 +145,12 @@ static void KGDumpTreeOnce(UIView *root, NSString *tag) {
     if (!found) {
         KGLog(@"未找到键盘背板 (root=%@)", NSStringFromClass(root.class));
         KGDumpTreeOnce(root, @"系统键盘");
+        return;
+    }
+
+    if (!KGIsMainBackdrop(found)) {
+        // 小背板 (候选栏按钮等): 不安装也不迁移, 等主背板回到树里再说
+        KGLog(@"忽略小背板 %@ frame=%@", NSStringFromClass(found.class), NSStringFromCGRect(found.frame));
         return;
     }
 
