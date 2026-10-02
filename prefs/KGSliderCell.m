@@ -26,6 +26,10 @@ static NSString * const kKGPrefsDomain = @"com.banli.keyboardglass.preferences";
 
     self.selectionStyle = UITableViewCellSelectionStyleNone;
     self.clipsToBounds = YES;
+    // 关键: 基类自带的 textLabel 会被 Preferences 填上同一个标题,
+    // 和自己的 titleLabel 叠成重影 —— 必须藏掉
+    self.textLabel.hidden = YES;
+    self.detailTextLabel.hidden = YES;
 
     UIColor *text = [UIColor labelColor];
 
@@ -67,6 +71,10 @@ static NSString * const kKGPrefsDomain = @"com.banli.keyboardglass.preferences";
 
 - (void)layoutSubviews {
     [super layoutSubviews];
+    // Preferences 刷新 cell 内容时可能把 textLabel 重新点亮, 这里再压一次
+    self.textLabel.hidden = YES;
+    self.detailTextLabel.hidden = YES;
+
     CGFloat width = self.contentView.bounds.size.width;
     CGFloat height = self.contentView.bounds.size.height;
     if (width <= 0) return;

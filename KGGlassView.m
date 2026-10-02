@@ -158,7 +158,7 @@ static UIBezierPath *KGMakeTopRingPath(CGRect bounds, CGFloat radius, CGFloat ri
         (id)[[UIColor whiteColor] colorWithAlphaComponent:highlight * 0.55].CGColor,
     ];
     self.rimLayer.locations = @[@0.0, @0.45, @1.0];
-    UIBezierPath *rimRing = KGMakeTopRingPath(bounds, style.cornerRadius, 1.2);
+    UIBezierPath *rimRing = KGMakeTopRingPath(bounds, style.cornerRadius, 2.0);
     self.rimMask.path = rimRing.CGPath;
     self.rimLayer.mask = self.rimMask;
 

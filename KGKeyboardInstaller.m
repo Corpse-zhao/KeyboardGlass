@@ -122,6 +122,7 @@ static void KGDumpTreeOnce(UIView *root, NSString *tag) {
     UIView *backdrop = self.nativeBackdrop;
     if (self.glassView && self.glassView.superview && backdrop && backdrop.superview) {
         [self syncGeometryWithBackdrop:backdrop];
+        [self enforceNativeBackdropState];
         [self applyStyleForMaterial:material];
         return;
     }
@@ -134,7 +135,8 @@ static void KGDumpTreeOnce(UIView *root, NSString *tag) {
     }
 
     KGLog(@"命中背板 %@ frame=%@", NSStringFromClass(found.class), NSStringFromCGRect(found.frame));
-    KGDumpTreeOnce(found, @"命中背板");
+    // dump 背板的父视图整棵树 —— 才能看到玻璃层插进去之后和兄弟节点的叠放关系
+    KGDumpTreeOnce(found.superview ?: found, @"背板所在层级");
     [self installOnBackdrop:found material:material];
 }
 
@@ -191,12 +193,25 @@ static void KGDumpTreeOnce(UIView *root, NSString *tag) {
     self.nativeBackdropAlpha = backdrop.alpha;
     self.nativeBackdropAlphaSaved = YES;
 
-    if ([KGPrefs hideNativeBackdrop]) {
-        // 原生背板是不透明的一层, 不隐藏的话玻璃层采不到下面的 App 内容
-        backdrop.alpha = 0.0;
-    }
-
+    [self enforceNativeBackdropState];
     [self applyStyleForMaterial:material];
+
+    // 安装结果写进探针: 下次诊断直接能看到层是否插上、插到了哪个父视图、参数是多少
+    KGWriteProbe([NSString stringWithFormat:
+        @"[install %@] host=%@ glassFrame=%@ hideNative=%d material=%ld blur=%.1f refraction=%.1f highlight=%.2f veil=%.2f radius=%.1f\n",
+        [NSDate date], NSStringFromClass(host.class),
+        NSStringFromCGRect(self.glassView.frame),
+        [KGPrefs hideNativeBackdrop], (long)material,
+        self.appliedStyle.blur, self.appliedStyle.refraction,
+        self.appliedStyle.highlight, self.appliedStyle.veil,
+        self.appliedStyle.cornerRadius]);
+}
+
+// 系统在键盘布局过程中可能会重设背板外观, 每次布局都把我们要的状态补一遍 (幂等)
+- (void)enforceNativeBackdropState {
+    UIView *backdrop = self.nativeBackdrop;
+    if (!backdrop || !self.nativeBackdropAlphaSaved) return;
+    backdrop.alpha = [KGPrefs hideNativeBackdrop] ? 0.0 : self.nativeBackdropAlpha;
 }
 
 - (void)syncGeometryWithBackdrop:(UIView *)backdrop {

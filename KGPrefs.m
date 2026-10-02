@@ -8,7 +8,9 @@ static const CGFloat kKGDefaultBlur         = 5.0;
 static const CGFloat kKGDefaultRefraction   = 9.0;
 static const CGFloat kKGDefaultHighlight    = 0.51;
 static const CGFloat kKGDefaultVeil         = 0.0;
-static const CGFloat kKGDefaultCornerRadius = 12.0;
+// 默认 0: 先不做圆角。圆角会让键盘四角露出下层内容, 而原生背板仍是直角,
+// 两者叠加反而难看 —— 等基础材质确认无误后再作为第二步开启。
+static const CGFloat kKGDefaultCornerRadius = 0.0;
 
 static BOOL kKGDebugEnabled = NO;
 
@@ -41,7 +43,10 @@ void KGLog(NSString *format, ...) {
         @"LiquidHighlight":    @(kKGDefaultHighlight),
         @"LiquidVeil":         @(kKGDefaultVeil),
         @"CornerRadius":       @(kKGDefaultCornerRadius),
-        @"HideNativeBackdrop": @YES,
+        // 默认 NO: 原生背板的模糊是系统自己实现的、一定工作; 先把它留着,
+        // 我们的层只做「材质增强」(高光轮廓 / 底色 / 折射环), 效果确定可见。
+        // 想更通透再打开这个开关, 那时才依赖自建 CABackdropLayer 的采样。
+        @"HideNativeBackdrop": @NO,
         @"DebugLog":           @NO,
     }];
     kKGDebugEnabled = [[self defaults] boolForKey:@"DebugLog"];
@@ -113,7 +118,7 @@ void KGLog(NSString *format, ...) {
 
 + (BOOL)hideNativeBackdrop {
     NSUserDefaults *d = [self defaults];
-    if ([d objectForKey:@"HideNativeBackdrop"] == nil) return YES;
+    if ([d objectForKey:@"HideNativeBackdrop"] == nil) return NO;
     return [d boolForKey:@"HideNativeBackdrop"];
 }
 
