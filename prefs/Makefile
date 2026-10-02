@@ -1,5 +1,5 @@
 BUNDLE_NAME = KeyboardGlassPreferences
-KeyboardGlassPreferences_FILES = KGRootListController.m
+KeyboardGlassPreferences_FILES = KGRootListController.m KGSliderCell.m
 KeyboardGlassPreferences_FRAMEWORKS = UIKit
 KeyboardGlassPreferences_INSTALL_PATH = /Library/PreferenceBundles
 KeyboardGlassPreferences_CFLAGS = -fobjc-arc -Wno-deprecated-declarations

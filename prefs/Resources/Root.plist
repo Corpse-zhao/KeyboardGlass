@@ -81,7 +81,9 @@
 
 		<dict>
 			<key>cell</key>
-			<string>PSSliderCell</string>
+			<string>PSStaticTextCell</string>
+			<key>cellClass</key>
+			<string>KGSliderCell</string>
 			<key>label</key>
 			<string>模糊强度</string>
 			<key>key</key>
@@ -106,7 +108,9 @@
 
 		<dict>
 			<key>cell</key>
-			<string>PSSliderCell</string>
+			<string>PSStaticTextCell</string>
+			<key>cellClass</key>
+			<string>KGSliderCell</string>
 			<key>label</key>
 			<string>边缘折射</string>
 			<key>key</key>
@@ -131,7 +135,9 @@
 
 		<dict>
 			<key>cell</key>
-			<string>PSSliderCell</string>
+			<string>PSStaticTextCell</string>
+			<key>cellClass</key>
+			<string>KGSliderCell</string>
 			<key>label</key>
 			<string>高光强度</string>
 			<key>key</key>
@@ -156,7 +162,9 @@
 
 		<dict>
 			<key>cell</key>
-			<string>PSSliderCell</string>
+			<string>PSStaticTextCell</string>
+			<key>cellClass</key>
+			<string>KGSliderCell</string>
 			<key>label</key>
 			<string>底色浓度</string>
 			<key>key</key>
@@ -190,7 +198,9 @@
 
 		<dict>
 			<key>cell</key>
-			<string>PSSliderCell</string>
+			<string>PSStaticTextCell</string>
+			<key>cellClass</key>
+			<string>KGSliderCell</string>
 			<key>label</key>
 			<string>顶部圆角</string>
 			<key>key</key>

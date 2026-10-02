@@ -7,7 +7,10 @@
 
 + (instancetype)shared;
 
-// root 传 UIInputWindowController.view
+// root 传 UIInputWindowController.view (系统键盘)
 - (void)handleLayout:(UIView *)root;
+
+// root 传 UIInputViewController.view (第三方输入法扩展, 如微信输入法)
+- (void)handleExtensionLayout:(UIView *)root;
 
 @end

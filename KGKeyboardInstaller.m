@@ -34,6 +34,56 @@ static BOOL KGStyleEqual(KGStyle a, KGStyle b) {
         && a.dark == b.dark;
 }
 
+#pragma mark - 视图树探针
+
+// 探针双写: 越狱公共目录 (系统键盘进程可写) + 当前进程沙盒 Documents
+// (输入法扩展的沙盒可能拦住公共目录, 沙盒内这份 Filza 也能翻到)。
+static void KGWriteProbe(NSString *content) {
+    mkdir("/var/mobile/Documents/KeyboardGlass", 0755);
+    NSString *sandboxPath = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/kg_tweak_probe.txt"];
+    NSArray<NSString *> *paths = @[
+        @"/var/mobile/Documents/KeyboardGlass/tweak_probe.txt",
+        sandboxPath,
+    ];
+    NSData *data = [content dataUsingEncoding:NSUTF8StringEncoding];
+    for (NSString *path in paths) {
+        NSFileHandle *handle = [NSFileHandle fileHandleForUpdatingAtPath:path];
+        if (handle) {
+            [handle seekToEndOfFile];
+            [handle writeData:data];
+            [handle closeFile];
+            continue;
+        }
+        [data writeToFile:path atomically:YES];
+    }
+}
+
+static void KGDumpTree(UIView *view, NSUInteger depth, NSMutableString *out, NSInteger *budget) {
+    if (!view || *budget <= 0 || depth > 12) return;
+    (*budget)--;
+    for (NSUInteger i = 0; i < depth; i++) [out appendString:@"  "];
+    [out appendFormat:@"%@ | %@\n", NSStringFromClass(view.class), NSStringFromCGRect(view.frame)];
+    for (UIView *sub in view.subviews) {
+        KGDumpTree(sub, depth + 1, out, budget);
+    }
+}
+
+static void KGDumpTreeOnce(UIView *root, NSString *tag) {
+    static NSMutableDictionary *dumped = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ dumped = [NSMutableDictionary dictionary]; });
+    if (dumped[tag]) return;
+    dumped[tag] = @YES;
+
+    NSMutableString *out = [NSMutableString string];
+    [out appendFormat:@"==== [%@] %@ 键盘视图树 ====\n", [NSDate date], tag];
+    NSInteger budget = 300;
+    KGDumpTree(root, 0, out, &budget);
+    [out appendString:@"====\n"];
+    KGWriteProbe(out);
+    KGLog(@"已 dump %@ 视图树", tag);
+}
+
 @interface KGKeyboardInstaller ()
 @property (nonatomic, strong) KGGlassView *glassView;
 @property (nonatomic, weak)   UIView *nativeBackdrop;
@@ -78,11 +128,20 @@ static BOOL KGStyleEqual(KGStyle a, KGStyle b) {
     UIView *found = [self findBackdropIn:root];
     if (!found) {
         KGLog(@"未找到键盘背板 (root=%@)", NSStringFromClass(root.class));
+        KGDumpTreeOnce(root, @"系统键盘");
         return;
     }
 
     KGLog(@"命中背板 %@ frame=%@", NSStringFromClass(found.class), NSStringFromCGRect(found.frame));
+    KGDumpTreeOnce(found, @"命中背板");
     [self installOnBackdrop:found material:material];
+}
+
+// 第三方输入法扩展入口: 视图全部自绘, 先 dump 再按同一套逻辑尝试安装
+- (void)handleExtensionLayout:(UIView *)root {
+    if (!root) return;
+    KGDumpTreeOnce(root, @"输入法扩展");
+    [self handleLayout:root];
 }
 
 #pragma mark - 探测

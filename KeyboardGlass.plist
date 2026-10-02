@@ -8,6 +8,9 @@
 		<array>
 			<string>com.apple.UIKit</string>
 			<string>com.apple.springboard</string>
+			<string>com.tencent.wetype.wxkb</string>
+			<string>com.tencent.wetype.wxkb_plugin</string>
+			<string>com.tencent.inputmethod.wetype.keyboard</string>
 		</array>
 	</dict>
 </dict>
