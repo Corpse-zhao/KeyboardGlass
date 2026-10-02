@@ -18,7 +18,7 @@
 //   4) 高光   rimLayer —— 边缘环形 CAGradientLayer, 上亮下暗的玻璃轮廓线
 @interface KGGlassLayer : CALayer
 
-@property (nonatomic, assign) KGStyle style;
+@property (nonatomic, assign) KGStyle kgStyle;   // 不能叫 style —— CALayer 自带 NSDictionary *style
 @property (nonatomic, assign) BOOL darkMode;
 
 // 调试: 画一圈青色边框 + 半透明品红填充, 用来确认层装上没有、位置对不对

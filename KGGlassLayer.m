@@ -98,7 +98,7 @@ static UIBezierPath *KGMakeTopRingPath(CGRect bounds, CGFloat radius, CGFloat ri
 }
 
 - (void)applyStyle:(KGStyle)style dark:(BOOL)dark {
-    self.style = style;
+    self.kgStyle = style;
     self.darkMode = dark;
     [self setNeedsLayout];
 }
@@ -110,7 +110,7 @@ static UIBezierPath *KGMakeTopRingPath(CGRect bounds, CGFloat radius, CGFloat ri
     if (CGRectIsEmpty(bounds)) return;
 
     BOOL dark = self.darkMode;
-    KGStyle style = self.style;
+    KGStyle style = self.kgStyle;
 
     // ---- 1. 本体: 模糊下方内容 ----
     self.backdropLayer.frame = bounds;
