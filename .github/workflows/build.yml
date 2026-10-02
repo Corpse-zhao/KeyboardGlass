@@ -1,0 +1,67 @@
+name: Build KeyboardGlass
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    # 必须用 macOS 运行器: Apple 原生 clang + ld64 才能产出正确的 arm64e 新 ABI。
+    # Linux 工具链编出的 arm64e 注入系统进程时会在 objc readClass 直接 SIGBUS。
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Theos
+        uses: actions/checkout@v4
+        with:
+          repository: theos/theos
+          ref: master
+          submodules: recursive
+          path: theos
+
+      - name: Install iOS SDK
+        uses: actions/checkout@v4
+        with:
+          repository: theos/sdks
+          sparse-checkout: iPhoneOS14.5.sdk
+          path: theos/sdks
+
+      - name: Install dependencies
+        run: |
+          brew install make xz ldid
+          gmake --version | head -1
+
+      - name: Build package
+        env:
+          THEOS: ${{ github.workspace }}/theos
+        run: |
+          gmake package THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1
+
+      - name: Inspect package contents
+        run: |
+          ls -la packages/
+          for f in packages/*.deb; do
+            echo "===== $f"
+            dpkg-deb -c "$f"
+            echo "----- control"
+            dpkg-deb -f "$f"
+          done
+
+      - name: Verify dylib arch slices
+        run: |
+          DYLIB=$(find .theos/obj -name 'KeyboardGlass.dylib' | head -1)
+          echo "dylib: $DYLIB"
+          [ -n "$DYLIB" ] && lipo -info "$DYLIB"
+          PREFS=$(find .theos/obj -name 'KeyboardGlassPreferences' -type f | head -1)
+          echo "prefs: $PREFS"
+          [ -n "$PREFS" ] && lipo -info "$PREFS"
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: KeyboardGlass-deb
+          path: packages/*.deb
+          if-no-files-found: error

@@ -1,0 +1,292 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>title</key>
+	<string>键盘液态玻璃</string>
+	<key>items</key>
+	<array>
+
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>键盘液态玻璃</string>
+			<key>footerText</key>
+			<string>给系统键盘的背板换上 iOS 26 风格的玻璃材质。改完切换一次键盘即可看到效果。</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>启用</string>
+			<key>key</key>
+			<string>Enabled</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.banli.keyboardglass.preferences</string>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSLinkListCell</string>
+			<key>label</key>
+			<string>玻璃材质</string>
+			<key>key</key>
+			<string>Material</string>
+			<key>default</key>
+			<integer>3</integer>
+			<key>defaults</key>
+			<string>com.banli.keyboardglass.preferences</string>
+			<key>detail</key>
+			<string>PSListItemsController</string>
+			<key>validTitles</key>
+			<array>
+				<string>关闭</string>
+				<string>超薄</string>
+				<string>薄</string>
+				<string>标准</string>
+				<string>液态玻璃</string>
+			</array>
+			<key>validValues</key>
+			<array>
+				<integer>-1</integer>
+				<integer>0</integer>
+				<integer>1</integer>
+				<integer>2</integer>
+				<integer>3</integer>
+			</array>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>液态玻璃参数</string>
+			<key>liquidOnly</key>
+			<true/>
+			<key>footerText</key>
+			<string>仅在「液态玻璃」档生效。折射越大，键盘上边缘的内容拉伸越明显；底色浓度用来压住玻璃的通透感。</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>label</key>
+			<string>模糊强度</string>
+			<key>key</key>
+			<string>LiquidBlur</string>
+			<key>default</key>
+			<real>5</real>
+			<key>min</key>
+			<real>0</real>
+			<key>max</key>
+			<real>18</real>
+			<key>showValue</key>
+			<true/>
+			<key>liquidOnly</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.banli.keyboardglass.preferences</string>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>label</key>
+			<string>边缘折射</string>
+			<key>key</key>
+			<string>LiquidRefraction</string>
+			<key>default</key>
+			<real>9</real>
+			<key>min</key>
+			<real>0</real>
+			<key>max</key>
+			<real>24</real>
+			<key>showValue</key>
+			<true/>
+			<key>liquidOnly</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.banli.keyboardglass.preferences</string>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>label</key>
+			<string>高光强度</string>
+			<key>key</key>
+			<string>LiquidHighlight</string>
+			<key>default</key>
+			<real>0.51</real>
+			<key>min</key>
+			<real>0</real>
+			<key>max</key>
+			<real>1</real>
+			<key>showValue</key>
+			<true/>
+			<key>liquidOnly</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.banli.keyboardglass.preferences</string>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>label</key>
+			<string>底色浓度</string>
+			<key>key</key>
+			<string>LiquidVeil</string>
+			<key>default</key>
+			<real>0</real>
+			<key>min</key>
+			<real>0</real>
+			<key>max</key>
+			<real>1</real>
+			<key>showValue</key>
+			<true/>
+			<key>liquidOnly</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.banli.keyboardglass.preferences</string>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>键盘外观</string>
+			<key>footerText</key>
+			<string>顶部圆角让键盘像 iOS 26 那样从屏幕底部浮起来。设为 0 则保持原来的直角。</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>label</key>
+			<string>顶部圆角</string>
+			<key>key</key>
+			<string>CornerRadius</string>
+			<key>default</key>
+			<real>12</real>
+			<key>min</key>
+			<real>0</real>
+			<key>max</key>
+			<real>24</real>
+			<key>showValue</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.banli.keyboardglass.preferences</string>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>兼容与调试</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>隐藏原生背板</string>
+			<key>key</key>
+			<string>HideNativeBackdrop</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.banli.keyboardglass.preferences</string>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>隐藏系统原有的背板，玻璃层才能采到键盘下方的画面。键盘看起来缺色就把它关掉。</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>调试日志</string>
+			<key>key</key>
+			<string>DebugLog</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.banli.keyboardglass.preferences</string>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>打开后会向系统日志输出 [KeyboardGlass] 前缀的调试信息，排查问题后再关掉。</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>label</key>
+			<string>恢复本页默认设置</string>
+			<key>action</key>
+			<string>resetPage:</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>板栗仁 · KeyboardGlass 0.1.0</string>
+		</dict>
+
+	</array>
+</dict>
+</plist>

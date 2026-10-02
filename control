@@ -1,0 +1,9 @@
+Package: com.banli.keyboardglass
+Name: 键盘液态玻璃
+Version: 0.1.0
+Architecture: iphoneos-arm64
+Description: FVV
+Maintainer: 板栗仁
+Author: 板栗仁
+Section: Tweaks
+Depends: mobilesubstrate, firmware (>= 16.0)
