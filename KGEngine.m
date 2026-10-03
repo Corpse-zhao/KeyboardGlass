@@ -442,12 +442,27 @@ static BOOL KGIsBigEnough(UIView *v, UIView *host) {
     static BOOL installed = NO;
     if (installed) return;
     installed = YES;
+    // 【信号清单】只用 Darwin/iOS 确实有的那几个。
+    //
+    // 【踩过的坑】v3.0.1 第一次编译挂了:
+    //     KGEngine.m:450: error: use of undeclared identifier 'SIGSTKFLT'
+    // SIGSTKFLT(stack fault) 是 **Linux/BSD** 的信号, Darwin 根本没有它 ——
+    // 栈溢出在 macOS/iOS 上表现为 **SIGBUS**, 而 SIGBUS 已经接了。
+    // 所以这里少一个不是漏洞, 补上反而编不过。
+    //
+    // 覆盖到的:
+    //   SIGSEGV  野指针 / 爆栈
+    //   SIGBUS   栈溢出 / 未对齐访问(macOS 上爆栈走这个)
+    //   SIGABRT  C++异常 / NSAssert / __builtin_trap
+    //   SIGILL   未定义指令 / Logos 生成的坏代码
+    //   SIGFPE   除零、整数溢出
+    //   SIGTRAP  调试陷阱 —— 也接, 因为 arm64e 上某些非法状态走这个
     signal(SIGSEGV, KGSignalHandler);
     signal(SIGABRT, KGSignalHandler);
     signal(SIGBUS,  KGSignalHandler);
     signal(SIGILL,  KGSignalHandler);
-    // 栈溢出(SIGSEGV 的子类)单独也要接, 否则爆栈时统计不到。
-    signal(SIGSTKFLT, KGSignalHandler);
+    signal(SIGFPE,  KGSignalHandler);
+    signal(SIGTRAP, KGSignalHandler);
     KGLog(@"崩溃陷阱已安装(3.0.1)");
 }
 
