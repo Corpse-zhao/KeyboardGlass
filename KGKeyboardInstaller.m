@@ -61,6 +61,14 @@ static NSString * const kKGCircuitOpenKey = @"CircuitOpen";
     [d synchronize];
 }
 
+@end
+
+// ======================================================================
+// 熔断器全是类方法, 不依赖任何实例状态, 所以单独一个 @implementation
+// 放在文件最前面 —— 它要在 KGWriteProbe 之前就用上, 而后者是后面才
+// 定义的静态函数。分开写比把整个实现体顺序调来调去清楚。
+// ======================================================================
+
 #pragma mark - 探针
 
 static void KGWriteProbe(NSString *content) {
