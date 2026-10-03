@@ -40,7 +40,11 @@ static const CGFloat kKGDefaultCornerRadius = 10.0;
 //        那层(_UIVisualEffectBackdropView)实测 uie=0, 是键盘「实心浅灰」
 //        真正的元凶。旧存档里没有它, 不迁移就永远是 registerDefaults 的 0.65,
 //        而用户之前十一个版本攒下的「底色浓度」是按另一套语义调出来的, 得重置。
-static const NSInteger kKGParamsVersion = 8;
+// 9 = v1.1.0 新增五个动作的独立开关 + 安全档。
+//     **必须升**: 否则用户存档里没有这些键, 全部落到 registerDefaults,
+//     而安全档(SafeMode)默认必须是**开**的 —— 新装用户不该一装就被
+//     一个未经验证的动作影响到键盘。二分要从最安全的那一档开始。
+static const NSInteger kKGParamsVersion = 9;
 
 // v1.0.0: 玻璃通透度默认值。系统那层浓白调淡 65% —— 留 35% 压住, 保证
 // 按键上的白字在浅色 App 背景下仍然读得清。拖到 1.0 玻璃感最强。
@@ -93,6 +97,20 @@ void KGLog(NSString *format, ...) {
         @"KeyplaneDim":        @(kKGDefaultKeyplaneDim),
         @"DebugLog":           @NO,
         @"ShowLayerOutline":   @NO,
+
+        // ---- v1.1.0: 五个动作的独立开关 ----
+        // 十三版失败的根本教训: 每版同时改多个变量, 反馈无法指出该排除谁。
+        // 拆成五个开关后, 用户装一次就能自己二分出病根, 不用重装十四次。
+        @"ActionGlass":          @YES,
+        @"ActionVeil":           @YES,
+        @"ActionAssistantBar":   @YES,
+        @"ActionKeyBottom":      @YES,
+        // 唯一默认关的: _UIRemoteView 是 430x932 全屏 uie=0, 万一它是键盘
+        // 内容的渲染载体, 隐藏它就等于把键盘整个藏起来 —— 用户 v1.0.0 的
+        // 截图正是「一片空白、没有键盘」。这一项必须由用户主动开。
+        @"ActionFullscreenWhite": @NO,
+        // 安全档默认**开**: 第一次装插件应该从「什么都不做」开始二分。
+        @"SafeMode":             @YES,
     }];
     // v1.0.0: WorkMode / GlassOverKeys 已彻底废弃, 这里**不注册**。
     // 注册一个永远没人读的下拉项, 只会让人拖到「纯探针」档以为插件没生效。
@@ -124,6 +142,15 @@ void KGLog(NSString *format, ...) {
     // 留着只会让设置面板冒出没人认得的档位名。
     [d removeObjectForKey:@"WorkMode"];
     [d removeObjectForKey:@"GlassOverKeys"];
+    // v1.1.0: 二分的起点是「什么都不做」。安全档必须由迁移强制写成 YES,
+    // 否则用户装上 v1.1.0 时若沿用旧档位, 第一个动作就直接作用于键盘 ——
+    // 而我们恰恰还不知道哪个动作是病根。
+    [d setObject:@YES forKey:@"SafeMode"];
+    [d setObject:@YES forKey:@"ActionGlass"];
+    [d setObject:@YES forKey:@"ActionVeil"];
+    [d setObject:@YES forKey:@"ActionAssistantBar"];
+    [d setObject:@YES forKey:@"ActionKeyBottom"];
+    [d setObject:@NO  forKey:@"ActionFullscreenWhite"];
     [d synchronize];
 }
 
@@ -247,6 +274,26 @@ void KGLog(NSString *format, ...) {
     if (v < 0) v = 0;
     if (v > 1) v = 1;
     return v;
+}
+
+// ---- v1.1.0: 五个动作的独立开关 ----
+// 读法统一: 存档里没有这个键时才用默认值。**没有把 safeMode 织进来** ——
+// 总闸在调用方统一判断, 这样每个动作的开关语义保持纯粹(只表示自己)。
++ (BOOL)kg_action:(NSString *)key def:(BOOL)def {
+    NSUserDefaults *d = [self defaults];
+    if ([d objectForKey:key] == nil) return def;
+    return [d boolForKey:key];
+}
+
++ (BOOL)actionGlass        { return [self kg_action:@"ActionGlass" def:YES]; }
++ (BOOL)actionVeil         { return [self kg_action:@"ActionVeil" def:YES]; }
++ (BOOL)actionAssistantBar { return [self kg_action:@"ActionAssistantBar" def:YES]; }
++ (BOOL)actionKeyBottom    { return [self kg_action:@"ActionKeyBottom" def:YES]; }
+// 默认 NO —— 唯一需要用户主动开的那个。
++ (BOOL)actionFullscreenWhite { return [self kg_action:@"ActionFullscreenWhite" def:NO]; }
+
++ (BOOL)safeMode {
+    return [self kg_action:@"SafeMode" def:YES];
 }
 
 + (BOOL)debugLog {

@@ -20,12 +20,13 @@ static void KGProbe(NSString *msg) {
 // 5 = v0.5.0 换 UIVisualEffectView 架构, 模糊/底色/圆角换新默认,
 // 6 = v0.6.0 删掉 GlassOverKeys (实测两次导致打不了字), 新增「按键区底色调淡」。
 // 8 = v1.0.0 架构重写: 删掉 WorkMode 二分隔离档位, 新增「玻璃通透度」。
+// 9 = v1.1.0 新增五个动作的独立开关 + 安全档。
 //
 // **必须和 KGPrefs.m 里的 kKGParamsVersion 保持一致。**
 // v0.4.3 之前两边是 4 和 5 不一致 —— 插件进程先迁移到自己的版本号, 设置
 // 进程再迁移一次, 谁先跑谁说了算, 迁移结果不确定。这类「双份常量」必须
 // 当成一个字段看待, 改一边就要同时改另一边。
-static const NSInteger kKGParamsVersion = 8;
+static const NSInteger kKGParamsVersion = 9;
 static const double kKGRecommendedBlur       = 18.0;
 static const double kKGRecommendedRefraction = 14.0;
 static const double kKGRecommendedHighlight  = 0.55;
@@ -64,8 +65,17 @@ static void KGMigrateParamsIfNeeded(NSUserDefaults *defaults) {
     // 留着它们, 用户会拖到「① 纯探针」然后以为插件没生效。
     [defaults removeObjectForKey:@"WorkMode"];
     [defaults removeObjectForKey:@"GlassOverKeys"];
+    // v1.1.0: 二分的起点必须是「什么都不做」。
+    // 安全档强制写成 YES —— 新装用户不该一装就被一个我们还没验证过
+    // 有效性的动作影响键盘。「关全屏白底」强制 NO, 那一项有嫌疑。
+    [defaults setObject:@YES forKey:@"SafeMode"];
+    [defaults setObject:@YES forKey:@"ActionGlass"];
+    [defaults setObject:@YES forKey:@"ActionVeil"];
+    [defaults setObject:@YES forKey:@"ActionAssistantBar"];
+    [defaults setObject:@YES forKey:@"ActionKeyBottom"];
+    [defaults setObject:@NO  forKey:@"ActionFullscreenWhite"];
     [defaults synchronize];
-    KGProbe([NSString stringWithFormat:@"[migrate] 参数版本 %ld -> %ld, 已写入 v1.0.0 推荐值 + 废弃项已清除 + 熔断计数已清零",
+    KGProbe([NSString stringWithFormat:@"[migrate] 参数版本 %ld -> %ld, 已写入 v1.1.0 推荐值 + 安全档已开 + 废弃项已清除 + 熔断计数已清零",
              (long)old, (long)kKGParamsVersion]);
 }
 
@@ -141,6 +151,13 @@ static void KGMigrateParamsIfNeeded(NSUserDefaults *defaults) {
     [defaults setObject:@(kKGRecommendedKeyDim)     forKey:@"KeyplaneDim"];
     [defaults removeObjectForKey:@"WorkMode"];
     [defaults removeObjectForKey:@"GlassOverKeys"];
+    // 恢复默认 = 回到二分的起点: 安全档开、全屏白底关。
+    [defaults setObject:@YES forKey:@"SafeMode"];
+    [defaults setObject:@YES forKey:@"ActionGlass"];
+    [defaults setObject:@YES forKey:@"ActionVeil"];
+    [defaults setObject:@YES forKey:@"ActionAssistantBar"];
+    [defaults setObject:@YES forKey:@"ActionKeyBottom"];
+    [defaults setObject:@NO  forKey:@"ActionFullscreenWhite"];
     [defaults synchronize];
     KGProbe(@"[reset] 已恢复 v1.0.0 推荐参数 (废弃项已清除)");
     _specifiers = nil;

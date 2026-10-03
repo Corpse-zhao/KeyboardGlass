@@ -176,6 +176,7 @@ static UIView *KGKeyLayerIn(UIView *host) {
 @property (nonatomic, assign) BOOL didDumpTree;
 @property (nonatomic, assign) NSUInteger probeCount;
 @property (nonatomic, copy)   NSString *lastSignature;
+@property (nonatomic, copy)   NSString *lastSwitchSig;
 
 // 观测 -> 定时器
 @property (nonatomic, weak)   UIView *seenHostView;
@@ -257,10 +258,10 @@ static UIView *KGKeyLayerIn(UIView *host) {
                                                     userInfo:nil
                                                      repeats:YES];
     [[NSRunLoop mainRunLoop] addTimer:self.workerTimer forMode:NSRunLoopCommonModes];
-    KGLog(@"v1.0.0 已启动: 0.4s 定时器, 稳定性闸=连续2帧相同");
-    KGLog(@"v1.0.0 铁律: 只改 userInteractionEnabled=0 的层 —— 原理上不可能影响点击");
-    KGLog(@"v1.0.0 重启: 按键区底板调淡(删除 0.55 触摸下限, 实测该层 uie=0 本就与触摸无关)");
-    KGLog(@"v1.0.0 停用: 工作模式二分隔离(改按 uie 判据单线选层, 不再需要档位)");
+    KGLog(@"v1.1.0 已启动: 0.4s 定时器, 稳定性闸=连续2帧相同");
+    KGLog(@"v1.1.0 新增: 五个动作独立开关 + 安全档。十三版每版同时改多个变量, 反馈无法定位, 这一版让用户自己二分");
+    KGLog(@"v1.1.0 默认: 安全档=开(零动作), 全屏白底=关(有嫌疑: 430x932 全屏层, 可能是键盘画面本身)");
+    KGLog(@"v1.1.0 铁律仍生效: 只改 userInteractionEnabled=0 的层");
 }
 
 - (void)workerTick:(NSTimer *)timer {
@@ -311,13 +312,16 @@ static UIView *KGKeyLayerIn(UIView *host) {
     }
     if (self.stableCount < 2) { self.stableCount++; return; }
 
-    // 收起 -> 彻底恢复, 并关掉全屏白底
+    // 收起 -> 彻底恢复(alpha 复原、玻璃层撤掉)
     if (!KGIsKeyboardSized(host) || !KGIsOnScreen(host)) {
         if (self.glassView.superview) [self.glassView removeFromSuperview];
         [self restoreAll];
-        // v1.0.0: 键盘不在屏幕上时, 那个 932pt 全屏白底必须关掉。
-        // 它 uie=0, 关掉不影响任何手势 —— 纯粹是视觉残留。
-        [self setFullscreenWhiteHidden:YES];
+        // v1.1.0: 只有「全屏白底」开关打开时才动它。
+        // 这一行在 v1.0.0 是无条件执行的 —— 于是安全档(零动作)名不副实,
+        // 键盘收起时仍然会被我们改一个全屏 uie=0 的层。
+        if ([KGPrefs actionFullscreenWhite]) {
+            [self setFullscreenWhiteHidden:YES];
+        }
         self.hostView = nil;
         self.dirty = NO;
         self.stableCount = 0;
@@ -325,7 +329,21 @@ static UIView *KGKeyLayerIn(UIView *host) {
         return;
     }
 
-    if (!self.dirty && self.glassView.superview) return;
+    // 早退条件里必须带上「开关签名」, 否则用户在设置里拨了开关,
+    // 玻璃层已经在树上(this.glassView.superview != nil)就直接 return 了,
+    // 新配置要等到下次键盘重建才生效 —— 用户会以为开关没用。
+    NSString *sw = [NSString stringWithFormat:@"%d%d%d%d%d%d",
+        [KGPrefs safeMode] ? 1 : 0,
+        [KGPrefs actionGlass] ? 1 : 0,
+        [KGPrefs actionVeil] ? 1 : 0,
+        [KGPrefs actionAssistantBar] ? 1 : 0,
+        [KGPrefs actionKeyBottom] ? 1 : 0,
+        [KGPrefs actionFullscreenWhite] ? 1 : 0];
+    if (!self.dirty && self.glassView.superview
+        && [sw isEqualToString:self.lastSwitchSig]) {
+        return;
+    }
+    self.lastSwitchSig = sw;
     self.dirty = NO;
 
     [self refreshWithHost:host];
@@ -359,17 +377,49 @@ static UIView *KGKeyLayerIn(UIView *host) {
         [self dumpTreeForHost:host];
     }
 
-    [self placeGlass:host];
-    self.glassView.hidden = NO;
-    [self applyStyle:material];
+    // ---- v1.1.0 安全档: 一个动作都不执行 ----
+    // 这是二分的第零档。插件照常运行、照常观测写探针, 但**一行都不改视图树**。
+    // 用途: 区分「白屏是插件引起的」与「白屏与插件无关」——
+    // 十三版之所以卡住, 就是从来没做过这个最基础的对照。
+    if ([KGPrefs safeMode]) {
+        [self teardownGlassOnly];
+        [self detectFullscreenWhite:host];
+        [self writeProbe:host material:material];
+        return;
+    }
 
-    // ---- 四个动作, 每个都只作用在 uie=0 的层上 ----
-    [self applyVeilLayersInHost:host];
-    [self applyAssistantBar:host];
-    [self applyKeyBottomDim:host];
+    // ---- 五个动作, 每个都只作用在 uie=0 的层, 且各自受独立开关控制 ----
+    // 【为什么要拆开关】十三版每版同时改多个变量, 用户的「还是没解决」
+    // 只能说明「这四个的组合不对」, 指出不了是哪个。拆开之后一次安装
+    // 就能二分出病根, 不用重装十四次。
+    if ([KGPrefs actionGlass]) {
+        [self placeGlass:host];
+        self.glassView.hidden = NO;
+        [self applyStyle:material];
+    } else {
+        [self teardownGlassOnly];
+    }
+
+    if ([KGPrefs actionVeil])         { [self applyVeilLayersInHost:host]; }
+    if ([KGPrefs actionAssistantBar]) { [self applyAssistantBar:host]; }
+    if ([KGPrefs actionKeyBottom])    { [self applyKeyBottomDim:host]; }
+    // 【v1.1.0 铁律】「找」无条件, 「动」才看开关。
+    // 早先写成 `if ([KGPrefs actionFullscreenWhite]) { [self applyFullscreenWhite:host]; }`
+    // 是错的: 开关默认关 → 定位根本不执行 → 探针写 fullscreenWhite=none,
+    // 而 none 既可能是「不存在」也可能是「没去找」。这正是 v1.0.0 让我
+    // 无法判断的同一个坑, 不能在排查版里再犯一次。
+    // applyFullscreenWhite 内部已经做到: 永远先 detect, 只在开关开时才 hidden。
     [self applyFullscreenWhite:host];
 
     [self writeProbe:host material:material];
+}
+
+// 只把玻璃层撤掉, 不动 alpha 也不动全屏白底。
+// 安全档用它 —— 保证「什么都不做」是真的什么都不做。
+- (void)teardownGlassOnly {
+    if (self.glassView.superview) [self.glassView removeFromSuperview];
+    self.glassView.hidden = YES;
+    self.hasAppliedStyle = NO;
 }
 
 #pragma mark - 1. 玻璃层(uie=0)
@@ -553,41 +603,56 @@ static UIView *KGKeyLayerIn(UIView *host) {
 
 #pragma mark - 5. 全屏白底 _UIRemoteView (uie=0, 在手势覆盖层内部)
 
+// 【v1.1.0 关键修正】「找」和「动」必须拆开。
+// v1.0.0 把两者绑在一起: 开关(当时没有)=永远执行, 于是
+//   - 找不到时探针只写 none, 我无法区分「不存在」与「没去找」
+//   - 找到就直接 hidden=YES, 万一它是键盘内容的渲染载体就把键盘藏了
+// 而用户 v1.0.0 的截图正是「一片空白、没有键盘」—— 我至今无法排除
+// 是这一刀造成的, 因为**从来没验证过它到底找到没有**。
+//
+// 现在: 无论开关开没开都去找、都记录; 只有开关打开时才真的隐藏。
 - (void)applyFullscreenWhite:(UIView *)host {
+    [self detectFullscreenWhite:host];
+    // 默认关。所以装上 v1.1.0 的默认状态是「只观察不动」。
+    if ([KGPrefs actionFullscreenWhite]) {
+        [self setFullscreenWhiteHidden:YES];
+    }
+}
+
+// 只负责定位并记录, 不修改任何属性。
+- (void)detectFullscreenWhite:(UIView *)host {
+    if (self.fullscreenWhiteView && self.fullscreenWhiteView.superview) return;
+
     UIView *container = host.superview;
     if (!container) return;
     CGFloat screenArea = UIScreen.mainScreen.bounds.size.width
                        * UIScreen.mainScreen.bounds.size.height;
     if (screenArea <= 0) return;
 
-    if (!self.fullscreenWhiteView || !self.fullscreenWhiteView.superview) {
-        self.fullscreenWhiteView = nil;
-        // 探针实锤的层级: UIEditingOverlayGestureView (d0, uie=1)
-        //   └ _UIRemoteView (d8, 430x932, uie=0)  ← 纯视觉的全屏白底
-        // 我们只关内层, 外层的手势能力保留。
-        NSMutableArray<UIView *> *q = [NSMutableArray arrayWithObject:container];
-        NSUInteger guard = 0;
-        while (q.count > 0 && guard++ < 300) {
-            UIView *cur = q.firstObject;
-            [q removeObjectAtIndex:0];
-            for (UIView *v in cur.subviews) {
-                NSString *n = NSStringFromClass(v.class);
-                CGFloat a = v.frame.size.width * v.frame.size.height;
-                // 类名 + 铺满全屏 + **uie=0**(纯视觉) 三个条件同时满足
-                if ([n containsString:@"RemoteView"] && !v.userInteractionEnabled
-                    && a >= screenArea * 0.85) {
-                    self.fullscreenWhiteView = v;
-                    break;
-                }
+    self.fullscreenWhiteView = nil;
+    // 探针实锤的层级: UIEditingOverlayGestureView (d0, uie=1)
+    //   └ _UIRemoteView (d8, 430x932, uie=0)
+    NSMutableArray<UIView *> *q = [NSMutableArray arrayWithObject:container];
+    NSUInteger guard = 0;
+    while (q.count > 0 && guard++ < 300) {
+        UIView *cur = q.firstObject;
+        [q removeObjectAtIndex:0];
+        for (UIView *v in cur.subviews) {
+            NSString *n = NSStringFromClass(v.class);
+            CGFloat a = v.frame.size.width * v.frame.size.height;
+            // 类名 + 铺满全屏 + **uie=0**(纯视觉) 三个条件同时满足
+            if ([n containsString:@"RemoteView"] && !v.userInteractionEnabled
+                && a >= screenArea * 0.85) {
+                self.fullscreenWhiteView = v;
+                break;
             }
-            if (self.fullscreenWhiteView) break;
-            [q addObjectsFromArray:cur.subviews];
         }
-        KGLog(@"锁定全屏白底层 %@",
-              self.fullscreenWhiteView ? NSStringFromClass(self.fullscreenWhiteView.class) : @"none");
+        if (self.fullscreenWhiteView) break;
+        [q addObjectsFromArray:cur.subviews];
     }
-    // 只要键盘在屏幕上, 这个全屏白底就该关掉 —— 它就是「整屏发白」的真身。
-    [self setFullscreenWhiteHidden:YES];
+    KGLog(@"全屏白底层定位结果: %@ (开关=%@, 未开时只记录不动)",
+          self.fullscreenWhiteView ? NSStringFromClass(self.fullscreenWhiteView.class) : @"none",
+          [KGPrefs actionFullscreenWhite] ? @"开" : @"关");
 }
 
 - (void)setFullscreenWhiteHidden:(BOOL)hidden {
@@ -704,20 +769,42 @@ static UIView *KGKeyLayerIn(UIView *host) {
            NSStringFromCGRect(fw.frame), fw.hidden ? 1 : 0]
         : @"none";
 
-    NSString *sig = [NSString stringWithFormat:@"%@|%@|%@|%@|%@|%@|%.3f",
+    // 【v1.1.0 关键】签名里必须带上全部五个开关的状态。
+    // 十三版的探针只记「结果」不记「当时开了哪几项」, 于是我拿到一份
+    // 「veil=none」的日志也无法判断是「没找到」还是「那项本来就是关的」。
+    // 少了这一行, 每一份回传的探针都要靠猜。
+    NSString *switches = [NSString stringWithFormat:
+        @"safe=%d|glass=%d|veil=%d|bar=%d|key=%d|fsw=%d",
+        [KGPrefs safeMode] ? 1 : 0,
+        [KGPrefs actionGlass] ? 1 : 0,
+        [KGPrefs actionVeil] ? 1 : 0,
+        [KGPrefs actionAssistantBar] ? 1 : 0,
+        [KGPrefs actionKeyBottom] ? 1 : 0,
+        [KGPrefs actionFullscreenWhite] ? 1 : 0];
+
+    NSString *sig = [NSString stringWithFormat:@"%@|%@|%@|%@|%@|%@|%.3f|%@",
         NSStringFromCGRect(host.frame), veil, bar, kb, fwDesc,
         [self.glassView isDescendantOfView:host] ? @"in" : @"out",
-        (double)[KGPrefs glassTransparency]];
+        (double)[KGPrefs glassTransparency], switches];
     if ([sig isEqualToString:self.lastSignature]) return;
     self.lastSignature = sig;
     if (self.probeCount++ > 200) return;
 
+    // 开关状态用中文标注, 一眼能读。「安全档」单独标在最前面 ——
+    // 收到探针先看这一行, 它决定了后面所有数据该怎么解释。
     KGWriteProbe([NSString stringWithFormat:
-        @"[v1 %@] host=%@ frame=%@ key=%@\n"
+        @"[v1.1 %@] host=%@ frame=%@ key=%@\n"
+        @"   开关: %s  %s  %s  %s  %s  %s\n"
         @"   veil=%@\n   bar=%@\n   keyBottom=%@\n   fullscreenWhite=%@\n"
-        @"   glass=%@ veil滑块=%.2f keyDim=%.2f material=%ld\n",
+        @"   glass=%@ 通透度=%.2f 底板=%.2f 材质=%ld\n",
         [NSDate date], NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
         key ? NSStringFromClass(key.class) : @"none",
+        [KGPrefs safeMode] ? @"[安全档·零动作]" : @"[执行档]",
+        [KGPrefs actionGlass] ? @"玻璃=开" : @"玻璃=关",
+        [KGPrefs actionVeil] ? @"浓白=开" : @"浓白=关",
+        [KGPrefs actionAssistantBar] ? @"助手条=开" : @"助手条=关",
+        [KGPrefs actionKeyBottom] ? @"底板=开" : @"底板=关",
+        [KGPrefs actionFullscreenWhite] ? @"全屏白底=开" : @"全屏白底=关",
         veil, bar, kb, fwDesc,
         [self.glassView isDescendantOfView:host] ? @"in" : @"out",
         (double)[KGPrefs glassTransparency], (double)[KGPrefs keyplaneDim], (long)material]);

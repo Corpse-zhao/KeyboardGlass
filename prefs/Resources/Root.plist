@@ -30,6 +30,122 @@
 		</dict>
 		<dict>
 			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>这五个开关是 1.1.0 新增的，之前每一版都同时改好几处、让你重装去试，所以一直分不清是哪一处的问题。现在装一次就能自己试出是哪一处。改完收起再弹出键盘即可生效。
+
+「安全档」打开时插件完全不碰键盘，只在旁边记录数据。**请先保持它打开**——如果关着它问题依旧，说明问题与插件无关，那就别再折腾了，直接告诉我。换句话说：这一档是判断「还要不要继续排查」的开关，不是普通功能项。</string>
+			<key>label</key>
+			<string>排查用（先看这里）</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.banli.keyboardglass.preferences</string>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>key</key>
+			<string>SafeMode</string>
+			<key>label</key>
+			<string>安全档（一个动作都不执行）</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>关掉安全档后，这五项逐项控制插件的五处改动。排查建议：一次只关一项，看问题出没消失——这样能精确定位到是那一项。
+
+「关全屏白底」默认关着。之前那一版会自动去关一个铺满全屏的层，但你截的图里键盘整个不见了，很可能就是它把那层（可能是键盘自己的画面）藏掉了。它是唯一有嫌疑的项，所以改成由你决定要不要开。</string>
+			<key>label</key>
+			<string>逐项开关（排查用）</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.banli.keyboardglass.preferences</string>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>key</key>
+			<string>ActionGlass</string>
+			<key>label</key>
+			<string>1· 插玻璃层</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.banli.keyboardglass.preferences</string>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>key</key>
+			<string>ActionVeil</string>
+			<key>label</key>
+			<string>2 · 调淡系统浓白底</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.banli.keyboardglass.preferences</string>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>key</key>
+			<string>ActionAssistantBar</string>
+			<key>label</key>
+			<string>3 · 关顶部灰条</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.banli.keyboardglass.preferences</string>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>key</key>
+			<string>ActionKeyBottom</string>
+			<key>label</key>
+			<string>4 · 调淡按键底板</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.banli.keyboardglass.preferences</string>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>key</key>
+			<string>ActionFullscreenWhite</string>
+			<key>label</key>
+			<string>5 · 关全屏白底（有风险，默认关）</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+		<dict>
+			<key>cell</key>
 			<string>PSLinkListCell</string>
 			<key>default</key>
 			<integer>3</integer>
@@ -66,7 +182,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>1.0.0 是架构重写版。老版本反复修「键盘以外点不动」无效，原因已查明：之前一直把系统里那些「不参与点击判断」的纯视觉层当成触摸层在调。1.0.0 只动不参与点击判断的层，从机制上排除打字被破坏的可能。原来的「工作模式」下拉项已删除，不需要再选档。</string>
+			<string>1.1.0 是排查版。之前十三版每版同时改好几处、让你重装去试，所以一直分不清是哪一处的问题。这一版把五处改动拆成五个开关，装一次就能自己试出是哪一处。请从最上面的「安全档」开始看。</string>
 			<key>label</key>
 			<string>版本说明</string>
 		</dict>
@@ -368,7 +484,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>板栗仁 · KeyboardGlass 1.0.0</string>
+			<string>板栗仁 · KeyboardGlass 1.1.0</string>
 		</dict>
 	</array>
 	<key>title</key>
