@@ -486,10 +486,21 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         return;
     }
 
-    // 键盘收起 / 移出屏幕: 只是藏起来, 千万不能因此换宿主
-    if (!KGIsKeyboardSized(host) || !KGIsOnScreen(host)) {
+    // 键盘收起 / 移出屏幕: 只是藏起来, 千万不能因此换宿主。
+    //
+    // 【v0.7.1 修: 原来这里直接 return, 是「玻璃永远装不回去」的另一半原因】
+    // 收起态下 `KGIsKeyboardSized` 为假(高度塌成 0 或移出屏幕), 于是这个分支
+    // 每帧都命中, 而它只做了 hidden=YES 就返回。
+    // 关键在于: 键盘展开动画**结束时 frame 不再变化 -> layoutSubviews 不再被调**
+    // -> 「按键区已就位」那一刻根本没人来装玻璃。
+    // 于是玻璃停在 hidden=YES, 用户看到的就是「压根没有玻璃」。
+    //
+    // 修法: 收起态不 return, 继续往下走 —— 让玻璃**始终留在宿主里**(只是不显示),
+    // 这样展开动画的下一帧自然会把它移到按键之下。
+    BOOL collapsed = (!KGIsKeyboardSized(host) || !KGIsOnScreen(host));
+    if (collapsed) {
         if (self.glassView.superview) self.glassView.hidden = YES;
-        return;
+        // 不 return: 继续装玻璃(隐藏状态), 保证展开后不用重装。
     }
 
     if (self.hostView != host) {
@@ -534,14 +545,19 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 
     if (KGModeShowsGlass(mode)) {
         [self placeGlassInHost:host];
-        self.glassView.hidden = NO;
+        // 收起态保持隐藏, 但**玻璃已经在宿主里** —— 展开时无需重装。
+        // (v0.7.1: 原来是无条件 hidden=NO, 收起态也会强行显示)
+        self.glassView.hidden = collapsed ? YES : NO;
         [self applyStyleForMaterial:material];
     }
 
     // v0.6.0: 按键区底色调淡是**独立于「藏背景」**的一件事, 所以 Glass 档也做。
     // 「藏背景」是 Hide/Full 档的事 (v0.4.1 起刻意解耦, 用于二分隔离);
     // 「调淡按键区底色」则是让按键区变玻璃的必要步骤, 只要玻璃在就该做。
-    if (KGModeShowsGlass(mode) || KGModeHidesBackdrop(mode)) {
+    //
+    // v0.7.1: 收起态**不做**调淡。收起时重扫子树是纯浪费, 而且收起态的
+    // 子层结构(占位视图)跟展开态完全不同, 缓存里的层属于上一棵子树。
+    if (!collapsed && (KGModeShowsGlass(mode) || KGModeHidesBackdrop(mode))) {
         [self enforceKeyplaneBackdropInHost:host];
         // v0.7.0: 系统毛玻璃那层 85% 浓白才是「实心浅灰」的元凶。
         // 用同一个滑块(keyplaneDim)驱动, 因为两者都是「把系统自带的底色调淡」,
@@ -888,19 +904,43 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 
     UIView *fg = [self firstKeyLayerInHost:host];
 
-    // 【v0.4.3 铁律, 继续生效】找不到按键层 = 不知道玻璃该插在哪, 绝不能插。
-    // 旧代码让 target 停在 0, 结果插到最底层压在按键上面, 用户实测打不了字。
+    // 【v0.7.1 修: 「找不到按键就不插」这条铁律在动画场景下是错的】
+    //
+    // v0.4.3 立这条铁律时, 前提是「宿主一直是同一个, 按键区一直在」。
+    // 实测(2026-10-03 探针, 358 次宿主采样)发现: UIInputSetHostView 的子层
+    // 会**在两套结构之间反复切换**:
+    //   展开态:  UIView + UIKBInputBackdropView + _UIKBCompatInputView + ...
+    //   收起态:  UIKeyboardDockView + _UIRemoteKeyboardPlaceholderView
+    // 收起态里那个 _UIRemoteKeyboardPlaceholderView {{0,0},{430,288}}
+    // **里面根本没有按键**, 于是 firstKeyLayerInHost: 返回 nil ->
+    // 旧代码把玻璃撤出宿主。
+    //
+    // 致命之处在于: 键盘展开动画**结束时 layoutSubviews 不再被调用**
+    // (frame 没变化), 所以「按键出现」那一刻没人去重装玻璃
+    // -> 21 次采样里 12 次 glassViewIdx=NSNotFound -> 用户看到的就是
+    //    「压根没有玻璃」, 跟白底调淡完全无关。
+    //
+    // 修法: 找不到按键时**不要撤玻璃**, 改成插到宿主**最底下**(index 0)。
+    // 为什么这样安全:
+    //   收起态里本来就没有按键, 插哪都不会挡触摸;
+    //   等按键区出现, 下一轮 layout 会走下面的正常分支把它移到按键之下。
+    // 这与 v0.4.3 铁律并不矛盾 —— 那条铁律针对的是「**按键明明在, 却插错了
+    // 位置**」(target 停在 0 压到按键上面)。这里按键不在, 不存在压住的问题。
     if (!fg) {
-        if (self.glassView) {
-            [self.glassView removeFromSuperview];
-            self.glassView.hidden = YES;
+        NSInteger existing = [host.subviews indexOfObject:self.glassView];
+        if (existing == NSNotFound) {
+            [host insertSubview:self.glassView atIndex:0];
+            KGLog(@"玻璃暂驻宿主底部(按键区未就位): host=%@ subviews=%lu",
+                  NSStringFromClass(host.class), (unsigned long)host.subviews.count);
+        } else if (existing != 0) {
+            [host insertSubview:self.glassView atIndex:0];
         }
+        self.glassView.hidden = NO;
         return;
     }
-
     // insertSubview:belowSubview: 要求 sibling 关系。fg 可能是宿主的孙辈,
     // 直接用它会抛异常 —— 必须先取它在宿主下的那个祖先。
-    UIView *anchor = fg ? [self ancestorOf:fg under:host] : nil;
+    UIView *anchor = [self ancestorOf:fg under:host];
     if (!anchor) {
         if (self.glassView.superview) [self.glassView removeFromSuperview];
         self.glassView.hidden = YES;
@@ -1128,6 +1168,26 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     NSInteger vi = self.glassView ? [host.subviews indexOfObject:self.glassView] : NSNotFound;
     NSInteger li = self.glassView ? [host.layer.sublayers indexOfObject:self.glassView.layer] : NSNotFound;
     NSInteger fi = fg ? [host.subviews indexOfObject:[self ancestorOf:fg under:host]] : NSNotFound;
+
+    // 【v0.7.1 新增】玻璃位置的**明确判据**, 不再让读日志的人自己推。
+    //
+    // v0.7.0 的探针里 glassViewIdx 出现两种值: 一个真实下标, 一个 9223372036854775807
+    // —— 后者就是 NSNotFound 泄漏成整数(NSUIntegerMax 转 NSInteger 的结果)。
+    // 光看这一串数字判断不出「是没装上去」还是「装上了但被撤了」。
+    // 这里换成人话:
+    //   absent  = 玻璃根本不在宿主里
+    //   bottom  = 暂驻底部(按键区还没就位, 收起态)
+    //   underKeys = 装在按键区之下 ← 正常工作的状态
+    //   OVERKEYS = 压在按键区之上 ← 有问题
+    NSString *glassPos = @"absent";
+    if (self.glassView && self.glassView.superview == host && vi != NSNotFound) {
+        if (fi != NSNotFound) {
+            glassPos = (vi < fi) ? @"underKeys" : @"OVERKEYS";
+        } else {
+            glassPos = (vi == 0) ? @"bottom" : [NSString stringWithFormat:@"idx%ld", (long)vi];
+        }
+    }
+
     // 被锁定的那一层背景 (v0.4.1 起恒为单层)
     UIView *bg = self.cachedBackdrop;
     NSNumber *bgOrigin = bg ? [self.hiddenBackdrops objectForKey:bg] : nil;
@@ -1193,19 +1253,19 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 
     // signature 要把底板层数和真实 alpha 都算进去: v0.6.0 之前只记了类名,
     // 结果「3 张图里只调淡了 1 张」这种状态探针完全看不出来(签名没变就不重写)。
-    NSString *signature = [NSString stringWithFormat:@"%@|%@|%@|%ld|%ld|%ld|%ld|%@|%.3f|%lu|%.3f|%@",
+    NSString *signature = [NSString stringWithFormat:@"%@|%@|%@|%ld|%ld|%ld|%ld|%@|%.3f|%lu|%.3f|%@|%@",
         NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
         bg ? NSStringFromClass(bg.class) : @"none",
         (long)vi, (long)li, (long)fi, (long)mode,
         kbDesc, bg.alpha,
         (unsigned long)self.cachedKeyplaneBackdrops.count, [KGPrefs keyplaneDim],
-        veilDesc];
+        veilDesc, glassPos];
     if ([signature isEqualToString:self.lastProbeSignature]) return;
     self.lastProbeSignature = signature;
     if (self.probeCount++ > 60) return;
 
     KGWriteProbe([NSString stringWithFormat:
-        @"[install %@] mode=%ld host=%@ hostFrame=%@ onScreen=%d glassViewIdx=%ld/%lu glassLayerIdx=%ld/%lu fg=%@ subIdx=%ld fgDepth=%ld\n"
+        @"[install %@] mode=%ld host=%@ hostFrame=%@ onScreen=%d glassPos=%@ glassViewIdx=%ld/%lu glassLayerIdx=%ld/%lu fg=%@ subIdx=%ld fgDepth=%ld\n"
         @"         blurStyle=%.1f effect=%ld refraction=%.1f highlight=%.2f veil=%.2f radius=%.1f outline=%d material=%ld dark=%d keyDim=%.2f\n"
         @"         hiddenBg=%@\n"
         @"         keyBg=%@\n"
@@ -1213,7 +1273,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         @"         underGlass=%@\n",
         [NSDate date], (long)mode,
         NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
-        KGIsOnScreen(host),
+        KGIsOnScreen(host), glassPos,
         (long)vi, (unsigned long)host.subviews.count,
         (long)li, (unsigned long)host.layer.sublayers.count,
         fg ? NSStringFromClass(fg.class) : @"none", (long)fi, (long)KGDepthOfView(fg, host),
