@@ -26,47 +26,21 @@ static NSString * const kKGCrashCountKey = @"CrashCount";
 static NSString * const kKGCrashLastKey  = @"CrashLastTime";
 static NSString * const kKGCircuitOpenKey = @"CircuitOpen";
 
-@implementation KGKeyboardInstaller
-
-+ (void)noteHandledException:(NSException *)exception where:(NSString *)where {
-    @try {
-        NSUserDefaults *d = [KGPrefs defaults];
-        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
-        NSTimeInterval last = [d doubleForKey:kKGCrashLastKey];
-        NSInteger count = [d integerForKey:kKGCrashCountKey];
-        if (last <= 0 || (now - last) > kKGCrashWindow) count = 0;
-        count += 1;
-        [d setInteger:count forKey:kKGCrashCountKey];
-        [d setDouble:now forKey:kKGCrashLastKey];
-        if (count >= kKGCrashThreshold) {
-            [d setBool:YES forKey:kKGCircuitOpenKey];
-            KGWriteProbe([NSString stringWithFormat:
-                @"[熔断] %@ 第 %ld 次异常, 插件已停用: %@\n",
-                where, (long)count, exception.reason]);
-        }
-        [d synchronize];
-    } @catch (NSException *ignored) {
-        // 熔断器自己绝不能成为崩溃源
-    }
-}
-
-+ (BOOL)isCircuitOpen {
-    return [[KGPrefs defaults] boolForKey:kKGCircuitOpenKey];
-}
-
-+ (void)resetCircuit {
-    NSUserDefaults *d = [KGPrefs defaults];
-    [d removeObjectForKey:kKGCrashCountKey];
-    [d removeObjectForKey:kKGCircuitOpenKey];
-    [d synchronize];
-}
-
-@end
-
 // ======================================================================
-// 熔断器全是类方法, 不依赖任何实例状态, 所以单独一个 @implementation
-// 放在文件最前面 —— 它要在 KGWriteProbe 之前就用上, 而后者是后面才
-// 定义的静态函数。分开写比把整个实现体顺序调来调去清楚。
+// 【Objective-C 结构铁律 —— v1.0.0 在这里踩了两次】
+// ======================================================================
+// 1) 同一个类**只能有一个** @implementation。哪怕中间用 @end 闭合了,
+//    后面再来一个 @implementation 仍然是 reimplementation。
+// 2) 类扩展 `@interface Foo ()` 必须出现在**任何** @implementation 之前。
+//
+// v1.0.0 重写时把熔断器的三个类方法单独开了一个 @implementation 放在
+// 文件最前面(因为它要先调用下面才定义的 KGWriteProbe), 结果:
+//   - 忘了 @end  -> missing '@end' + 后面 15 个方法全部 no visible @interface
+//   - 补上 @end  -> 仍然 cannot declare class extension after class implementation
+//
+// 正解: **靠前向声明解决顺序问题, 不要拆 @implementation。**
+// 顶部已有 `static void KGWriteProbe(NSString *content);` 的前置声明,
+// 熔断器直接写进主实现即可, 调用顺序完全自由。
 // ======================================================================
 
 #pragma mark - 探针
@@ -219,6 +193,44 @@ static UIView *KGKeyLayerIn(UIView *host) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{ shared = [[KGKeyboardInstaller alloc] init]; });
     return shared;
+}
+
+#pragma mark - 崩溃熔断器
+
+// Objective-C 的 @try 只能抓 NSException, 抓不到野指针 / 栈溢出。
+// 连续异常超阈值就把插件整个关掉 —— 宁可没玻璃, 也不能再进安全模式。
+// 用户已经因为这个进过一次安全模式, 那次教训不能忘。
++ (void)noteHandledException:(NSException *)exception where:(NSString *)where {
+    @try {
+        NSUserDefaults *d = [KGPrefs defaults];
+        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+        NSTimeInterval last = [d doubleForKey:kKGCrashLastKey];
+        NSInteger count = [d integerForKey:kKGCrashCountKey];
+        if (last <= 0 || (now - last) > kKGCrashWindow) count = 0;
+        count += 1;
+        [d setInteger:count forKey:kKGCrashCountKey];
+        [d setDouble:now forKey:kKGCrashLastKey];
+        if (count >= kKGCrashThreshold) {
+            [d setBool:YES forKey:kKGCircuitOpenKey];
+            KGWriteProbe([NSString stringWithFormat:
+                @"[熔断] %@ 第 %ld 次异常, 插件已停用: %@\n",
+                where, (long)count, exception.reason]);
+        }
+        [d synchronize];
+    } @catch (NSException *ignored) {
+        // 熔断器自己绝不能成为崩溃源
+    }
+}
+
++ (BOOL)isCircuitOpen {
+    return [[KGPrefs defaults] boolForKey:kKGCircuitOpenKey];
+}
+
++ (void)resetCircuit {
+    NSUserDefaults *d = [KGPrefs defaults];
+    [d removeObjectForKey:kKGCrashCountKey];
+    [d removeObjectForKey:kKGCircuitOpenKey];
+    [d synchronize];
 }
 
 #pragma mark - 布局回调(只观测)
