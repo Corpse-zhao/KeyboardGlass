@@ -7,7 +7,7 @@ export ARCHS = arm64 arm64e
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = KeyboardGlass
-KeyboardGlass_FILES = Tweak.x KGPrefs.m KGGlassLayer.m KGKeyboardInstaller.m
+KeyboardGlass_FILES = Tweak.x KGPrefs.m KGGlassView.m KGKeyboardInstaller.m
 KeyboardGlass_FRAMEWORKS = UIKit QuartzCore
 KeyboardGlass_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-function
 

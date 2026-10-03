@@ -1,6 +1,6 @@
 #import <UIKit/UIKit.h>
 #import "KGPrefs.h"
-#import "KGGlassLayer.h"
+#import "KGGlassView.h"
 #import "KGKeyboardInstaller.h"
 
 // Logos 只会给 %hook 的目标生成前向声明 (@class), 那样编译器不知道它是
@@ -65,6 +65,6 @@
 %ctor {
     @autoreleasepool {
         [KGPrefs registerDefaults];
-        KGLog(@"KeyboardGlass 已加载 (0.4.3)");
+        KGLog(@"KeyboardGlass 已加载 (0.5.0)");
     }
 }

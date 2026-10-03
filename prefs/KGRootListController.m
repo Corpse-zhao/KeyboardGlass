@@ -16,14 +16,20 @@ static void KGProbe(NSString *msg) {
 }
 
 // 参数版本号。1 = 早期那组「在键盘上几乎全透明」的默认值, 2 = 液态玻璃推荐值,
-// 3 = 工作模式默认切到「完整」(这一步是错的), 4 = 默认退回「纯探针」。
-// 必须和 KGPrefs.m 里的 kKGParamsVersion 保持一致。
+// 3 = 工作模式默认切到「完整」(这一步是错的), 4 = 默认退回「纯探针」,
+// 5 = v0.5.0 换 UIVisualEffectView 架构, 模糊/底色/圆角换新默认。
+//
+// **必须和 KGPrefs.m 里的 kKGParamsVersion 保持一致。**
+// v0.4.3 之前两边是 4 和 5 不一致 —— 插件进程先迁移到自己的版本号, 设置
+// 进程再迁移一次, 谁先跑谁说了算, 迁移结果不确定。这类「双份常量」必须
+// 当成一个字段看待, 改一边就要同时改另一边。
 static const NSInteger kKGParamsVersion = 5;
 static const NSInteger kKGWorkModeProbe = 0;   // 必须与 KGPrefs.m 的 KGWorkModeProbe 一致
-static const double kKGRecommendedBlur       = 12.0;
-static const double kKGRecommendedRefraction = 10.0;
-static const double kKGRecommendedHighlight  = 0.65;
-static const double kKGRecommendedVeil       = 0.42;
+static const double kKGRecommendedBlur       = 18.0;
+static const double kKGRecommendedRefraction = 14.0;
+static const double kKGRecommendedHighlight  = 0.55;
+static const double kKGRecommendedVeil       = 0.52;
+static const double kKGRecommendedRadius     = 10.0;
 
 // 早期版本的默认值在键盘上完全看不出效果, 用户会以为插件没装成功。
 // 这里在「设置」进程里做一次迁移 —— 这个进程不沙盒, 写进去的位置插件
@@ -45,11 +51,13 @@ static void KGMigrateParamsIfNeeded(NSUserDefaults *defaults) {
     [defaults setObject:@(kKGRecommendedRefraction) forKey:@"LiquidRefraction"];
     [defaults setObject:@(kKGRecommendedHighlight)  forKey:@"LiquidHighlight"];
     [defaults setObject:@(kKGRecommendedVeil)       forKey:@"LiquidVeil"];
+    [defaults setObject:@(kKGRecommendedRadius)      forKey:@"CornerRadius"];
     // v0.4.1: 退回纯探针 —— 唯一被实测确认「能打字」的一档。
     // v0.3.0~0.4.0 我错误地把默认设成了「完整」, 理由是一句没验证过的推断,
     // 结果用户直接反馈「又不能点击了」。默认档必须是用户亲自验证过的。
     [defaults setObject:@(kKGWorkModeProbe)         forKey:@"WorkMode"];
     [defaults setObject:@YES                        forKey:@"HideNativeBackdrop"];
+    [defaults setObject:@NO                         forKey:@"GlassOverKeys"];
     [defaults synchronize];
     KGProbe([NSString stringWithFormat:@"[migrate] 参数版本 %ld -> %ld, 已写入推荐值 + 工作模式=纯探针 + 熔断计数已清零",
              (long)old, (long)kKGParamsVersion]);
@@ -121,8 +129,9 @@ static void KGMigrateParamsIfNeeded(NSUserDefaults *defaults) {
     [defaults setObject:@(kKGRecommendedRefraction) forKey:@"LiquidRefraction"];
     [defaults setObject:@(kKGRecommendedHighlight)  forKey:@"LiquidHighlight"];
     [defaults setObject:@(kKGRecommendedVeil)       forKey:@"LiquidVeil"];
-    [defaults setObject:@0                          forKey:@"CornerRadius"];
+    [defaults setObject:@(kKGRecommendedRadius)      forKey:@"CornerRadius"];
     [defaults setObject:@YES                        forKey:@"HideNativeBackdrop"];
+    [defaults setObject:@NO                         forKey:@"GlassOverKeys"];
     [defaults setObject:@(kKGWorkModeProbe)         forKey:@"WorkMode"];
     [defaults synchronize];
     KGProbe(@"[reset] 已恢复推荐参数 (工作模式=纯探针)");

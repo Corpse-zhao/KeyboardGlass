@@ -104,7 +104,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>仅在「液态玻璃」档生效。折射越大，键盘上边缘的内容拉伸越明显；底色浓度用来压住玻璃的通透感。</string>
+			<string>仅在「液态玻璃」档生效。模糊强度最低为 1, 不再允许归零 —— 归零等于把玻璃整个关掉, 键盘会变成完全透明。折射越大, 键盘上边缘的亮带越厚; 底色浓度用来压住通透感、保证按键文字看得清。</string>
 			<key>label</key>
 			<string>液态玻璃参数</string>
 			<key>liquidOnly</key>
@@ -116,7 +116,7 @@
 			<key>cellClass</key>
 			<string>KGSliderCell</string>
 			<key>default</key>
-			<real>12.0</real>
+			<real>18.0</real>
 			<key>defaults</key>
 			<string>com.banli.keyboardglass.preferences</string>
 			<key>get</key>
@@ -128,9 +128,9 @@
 			<key>liquidOnly</key>
 			<true/>
 			<key>max</key>
-			<real>18.0</real>
+			<real>40.0</real>
 			<key>min</key>
-			<real>0.0</real>
+			<real>1.0</real>
 			<key>set</key>
 			<string>setPreferenceValue:specifier:</string>
 			<key>showValue</key>
@@ -142,7 +142,7 @@
 			<key>cellClass</key>
 			<string>KGSliderCell</string>
 			<key>default</key>
-			<real>10.0</real>
+			<real>14.0</real>
 			<key>defaults</key>
 			<string>com.banli.keyboardglass.preferences</string>
 			<key>get</key>
@@ -154,7 +154,7 @@
 			<key>liquidOnly</key>
 			<true/>
 			<key>max</key>
-			<real>24.0</real>
+			<real>40.0</real>
 			<key>min</key>
 			<real>0.0</real>
 			<key>set</key>
@@ -168,7 +168,7 @@
 			<key>cellClass</key>
 			<string>KGSliderCell</string>
 			<key>default</key>
-			<real>0.65</real>
+			<real>0.55</real>
 			<key>defaults</key>
 			<string>com.banli.keyboardglass.preferences</string>
 			<key>get</key>
@@ -194,7 +194,7 @@
 			<key>cellClass</key>
 			<string>KGSliderCell</string>
 			<key>default</key>
-			<real>0.42</real>
+			<real>0.52</real>
 			<key>defaults</key>
 			<string>com.banli.keyboardglass.preferences</string>
 			<key>get</key>
@@ -228,7 +228,7 @@
 			<key>cellClass</key>
 			<string>KGSliderCell</string>
 			<key>default</key>
-			<real>0.0</real>
+			<real>10.0</real>
 			<key>defaults</key>
 			<string>com.banli.keyboardglass.preferences</string>
 			<key>get</key>
@@ -276,7 +276,7 @@
 			<key>defaults</key>
 			<string>com.banli.keyboardglass.preferences</string>
 			<key>footerText</key>
-			<string>玻璃默认插在按键之下, 只有键缝透出玻璃, 按键区仍是原来的不透明底色。打开这个开关会把玻璃移到按键之上, 整块键盘(含按键区)都变成玻璃 —— 那才是 iOS 26 的观感, 但玻璃会盖住按键, **能不能打字需要实测**。请切一次键盘后试打字, 不行就关掉。</string>
+			<string>玻璃默认插在按键之下, 只有键缝透出玻璃, 按键区仍是原来的不透明底色。打开这个开关会把玻璃移到按键之上, 整块键盘(含按键区)都变成玻璃 —— 那才是 iOS 26 的观感。v0.4.3 起玻璃层已显式关闭触摸响应, 实测打字不受影响; 若个别场景异常, 关掉即可, 玻璃仍然可见。</string>
 			<key>get</key>
 			<string>readPreferenceValue:</string>
 			<key>key</key>
@@ -352,7 +352,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>板栗仁 · KeyboardGlass 0.4.3</string>
+			<string>板栗仁 · KeyboardGlass 0.5.0</string>
 		</dict>
 	</array>
 	<key>title</key>

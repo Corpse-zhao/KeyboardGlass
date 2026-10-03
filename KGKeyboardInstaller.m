@@ -1,5 +1,5 @@
 #import "KGKeyboardInstaller.h"
-#import "KGGlassLayer.h"
+#import "KGGlassView.h"
 #import "KGPrefs.h"
 #import <sys/stat.h>
 
@@ -133,8 +133,13 @@ static BOOL KGIsUsableHost(UIView *view) {
 // 于是 KGContainsKeyboardContent 恒返回 NO —— 直接后果有两个:
 //   1) firstKeyLayerInHost: 永远找不到按键层 -> 玻璃层 target=0 -> 插到最上面,
 //      正好压在按键上面 -> 用户实测「③ 只插玻璃层就打不了字」。
-//   2) KGIsSafeToHide 的「肚子里有按键内容就��碰」这道保护也全部失效。
+//   2) KGIsSafeToHide 的「肚子里有按键内容就别碰」这道保护也全部失效。
 // 这一个深度上限, 同时造成了「挡触摸」和「保护失效」两个看似无关的现象。
+//
+// 【v0.5.0 补记】上限提到 8 之后触摸是修好了, 但那道保护**因为同一个原因
+// 彻底失效** —— 深度够得到之后, 主体背景 UIKBBackdropView 内部确实包着按键区,
+// 于是永远被判成「不能碰」。实测 hiddenBg=none 证实完整档从没藏掉过背景。
+// 修法见下面 KGIsSafeToHide 的新判据: 改成「藏的不是按键的祖先就行」。
 static const NSUInteger kKGMaxContentDepth = 8;
 
 static BOOL KGContainsKeyboardContent(UIView *view, NSUInteger depth) {
@@ -177,14 +182,30 @@ static BOOL KGLooksLikeKeyboardForeground(UIView *view) {
 //   「主体没变化」的观感问题, 靠调整这一层的插入 z 序来解决(让玻璃层压住
 //   它), 而不是靠把更多层一起藏掉。
 //
-// 判据保留面积门槛 (排除按键内部自带的小 backdrop) + 无按键内容 (防止按键
-// 自己消失), 但**不再批量隐藏**。
-static BOOL KGIsSafeToHide(UIView *view) {
+// 判据: 面积门槛 (排除按键内部自带的小 backdrop) + **不是按键层的祖先**。
+//
+// 【v0.5.0 关键修正】原来这里写的是「肚子里没有按键内容才可藏」。
+// v0.4.3 把深度上限从 4 提到 8 修好了触摸, 却**顺手把这道保护也弄失效了** ——
+// 深度够得到之后, 主体背景 UIKBBackdropView 内部确实包着按键区, 于是它被判成
+// 「肚子里有按键, 不能碰」, 永远不被选中藏。实测日志实锤:
+//     [install ...] mode=3 ... hiddenBg=none
+// 也就是「③ 完整档」从来没真正藏掉过任何背景层, 玻璃层一直压在一块
+// 不透明的原生背板上面 —— 这才是「没达到预期玻璃效果」的第二重原因。
+//
+// 现在换判据: **藏的不是按键的祖先, 就不会带走按键。**
+// 主体背景是按键的**兄弟**(都在 UIView{{0,45},{430,243}} 容器下), 藏掉它按键还在。
+// 这比「肚子里有没有按键」更准 —— 后者把「按键的祖先」和「按键的兄弟」一锅端了。
+static BOOL KGIsSafeToHide(UIView *view, UIView *keyLayer) {
     NSString *name = NSStringFromClass(view.class);
     if (![name containsString:@"Backdrop"]) return NO;
-    // 肚子里有按键内容的一律不能碰: alpha<=0.01 的视图会被 hitTest 跳过,
-    // 藏错对象会把整块键盘连触摸一起弄没 (v0.2.0 实锤过)。
-    if (KGContainsKeyboardContent(view, 0)) return NO;
+    if (!view) return NO;
+    // 祖先关系: view 是 keyLayer 或 keyLayer 的祖先 -> 藏它等于连按键一起藏。
+    UIView *cur = keyLayer;
+    NSUInteger guard = 0;
+    while (cur && guard++ < 40) {
+        if (cur == view) return NO;
+        cur = cur.superview;
+    }
     // 背景板都是整屏宽的。这条同时排掉了某些按键内部自带的小 backdrop。
     CGFloat screenWidth = view.window ? view.window.bounds.size.width
                                       : UIScreen.mainScreen.bounds.size.width;
@@ -280,7 +301,9 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 @interface KGKeyboardInstaller ()
 // 真正的主流程。由 refreshWithHost: 包着 @try 调用。
 - (void)kg_refreshWithHost:(UIView *)host;
-@property (nonatomic, strong) KGGlassLayer *glassLayer;
+// v0.5.0: 从 KGGlassLayer (纯 CALayer) 换成 KGGlassView (UIView + UIVisualEffectView)。
+// 换的原因见 KGGlassView.h —— CABackdropLayer 采不到别的窗口的内容, 玻璃等于全透明。
+@property (nonatomic, strong) KGGlassView *glassView;
 @property (nonatomic, weak)   UIView *hostView;          // 锁定的宿主
 // 键 = 被隐藏的原生背景层 (弱引用, 键盘重建时自动失效)
 // 值 = 它的原始 alpha (恢复用)
@@ -383,7 +406,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 
     // 键盘收起 / 移出屏幕: 只是藏起来, 千万不能因此换宿主
     if (!KGIsKeyboardSized(host) || !KGIsOnScreen(host)) {
-        if (self.glassLayer.superlayer) self.glassLayer.hidden = YES;
+        if (self.glassView.superview) self.glassView.hidden = YES;
         return;
     }
 
@@ -391,18 +414,18 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         KGLog(@"锁定宿主 %@ frame=%@ mode=%ld", NSStringFromClass(host.class),
               NSStringFromCGRect(host.frame), (long)mode);
         self.hostView = host;
-        [self.glassLayer removeFromSuperlayer];
+        [self.glassView removeFromSuperview];
         [self restoreNativeBackdrops];
-        self.glassLayer.hidden = YES;
+        self.glassView.hidden = YES;
 
         KGDumpHostChildren(host, mode == KGWorkModeProbe ? @"锁定宿主(纯探针)" : @"锁定宿主");
         [self scheduleStableTreeDump:host];
     }
 
-    // 从「插玻璃层」切到更低的档时, 必须把已经插进去的玻璃层撤掉
-    if (!KGModeShowsGlass(mode) && self.glassLayer.superlayer) {
-        KGLog(@"工作模式降到 %ld, 撤掉已插入的玻璃层", (long)mode);
-        [self.glassLayer removeFromSuperlayer];
+    // 从「插玻璃层」切到更低的档时, 必须把已经插进去的玻璃撤掉
+    if (!KGModeShowsGlass(mode) && self.glassView.superview) {
+        KGLog(@"工作模式降到 %ld, 撤掉已插入的玻璃", (long)mode);
+        [self.glassView removeFromSuperview];
     }
     // 从「藏背景」切到更低档时, 必须恢复原生背景
     if (!KGModeHidesBackdrop(mode)) {
@@ -411,7 +434,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 
     if (KGModeShowsGlass(mode)) {
         [self placeGlassInHost:host];
-        self.glassLayer.hidden = NO;
+        self.glassView.hidden = NO;
         [self applyStyleForMaterial:material];
     }
 
@@ -477,9 +500,9 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
             hit ? NSStringFromClass(hit.class) : @"nil"];
     }
     KGWriteProbe([NSString stringWithFormat:
-        @"[touch-diag %@] window=%@ winUserEnabled=%d glassIsLayer=%d 命中:%@\n",
+        @"[touch-diag %@] window=%@ winUserEnabled=%d glassIsView=%d 命中:%@\n",
         [NSDate date], NSStringFromClass(window.class), window.userInteractionEnabled,
-        (self.glassLayer != nil), detail]);
+        (self.glassView != nil), detail]);
 }
 
 #pragma mark - 探测
@@ -550,6 +573,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 // 主体背景藏了, 玻璃层下方才第一次真正透出 App 内容。
 - (UIView *)backdropInHost:(UIView *)host {
     if (!host) return nil;
+    UIView *keyLayer = [self firstKeyLayerInHost:host];
 
     UIView *best = nil;
     CGFloat bestArea = 0;
@@ -561,7 +585,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         [queue removeObjectAtIndex:0];
         if (!current) continue;
 
-        if (current != host && KGIsSafeToHide(current)) {
+        if (current != host && KGIsSafeToHide(current, keyLayer)) {
             CGFloat area = current.frame.size.width * current.frame.size.height;
             if (area > bestArea) {
                 bestArea = area;
@@ -578,81 +602,103 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 
 #pragma mark - 安装与拆卸
 
-// 把玻璃层挂到宿主的 layer 上 (不是 subview!)。
-// hitTest 只遍历 view, 所以挂在 layer 上的玻璃层**永远不可能**挡住触摸。
+// 把玻璃视图插到宿主里。**是 subview, 不是 layer。**
 //
-// 【v0.4.2 新增】玻璃层插在哪一层, 决定了「哪里变透明」。
+// 【v0.5.0 架构变更】旧版挂 CALayer, 理由是「hitTest 只遍历 view, layer 不可能挡触摸」。
+// 那个理由本身没错, 但代价太大: CALayer 的 backdrop 采不到别的窗口的内容,
+// 玻璃等于全透明。现在换成 UIVisualEffectView (系统键盘同款机制), 跨窗口有效。
+// 触摸安全改由 KGGlassView 内部显式 userInteractionEnabled=NO 保证 ——
+// 那是 UIKit 层面有明确契约的行为, 比「layer 天生不参与命中」更硬。
 //
-// v0.4.1 之前玻璃层一律插在按键层**之下** (= 所有背景之上、所有按键之下),
-// 于是只有按键之间的缝隙透出玻璃, 按键区自己的那层不透明底色仍然压在
-// 玻璃上方 —— 用户反馈精准描述为「背景透明了, 就是按键没透明」。
-// 那层底色 (UIKBKeyplaneView 自带的 backdrop) 不属于我们藏的那一类
-// (它不是整屏宽, 也可能自带按键内容), 所以藏背景永远藏不到它。
-//
-// 现在把 z 序做成两档, 由设置项 GlassOverKeys 控制:
-//   NO  (默认) = 插在按键之下 -> 只有键缝透出玻璃, 按键区保持原样, 稳
-//   YES         = 插在按键之上 -> 整块键盘(含按键区)都变玻璃, 就是 iOS 26 那个观感
-// 代价: 玻璃会盖在按键上。视觉上正确, 但**必须实测还能不能打字** ——
-// 这正是 v0.4.0 翻车的原因, 所以默认关、由用户主动开。
+// 【z 序】由设置项 GlassOverKeys 控制:
+//   NO  (默认) = 插在按键之下 -> 键缝透出玻璃, 按键区保持原样, 稳
+//   YES         = 插在按键之上 -> 整块键盘都成玻璃, 就是 iOS 26 那个观感
 - (void)placeGlassInHost:(UIView *)host {
-    if (!self.glassLayer) {
-        self.glassLayer = [[KGGlassLayer alloc] init];
+    if (!self.glassView) {
+        self.glassView = [[KGGlassView alloc] initWithFrame:host.bounds];
         self.hasAppliedStyle = NO;
     }
 
-    if (!CGRectEqualToRect(self.glassLayer.frame, host.bounds)) {
-        self.glassLayer.frame = host.bounds;
+    if (!CGRectEqualToRect(self.glassView.frame, host.bounds)) {
+        self.glassView.frame = host.bounds;
     }
 
-    CALayer *hostLayer = host.layer;
     BOOL overKeys = [KGPrefs glassOverKeys];
     UIView *fg = [self firstKeyLayerInHost:host];
 
-    // 【v0.4.3】找不到按键层 = 我不知道玻璃该插在哪。
-    // 这种情况**绝不能插** —— 旧代码让 target 停在 0, 结果插到最底层,
-    // 正好压在按键上面, 用户实测「打不了字」。
-    // 找不到就什么都不做: 少一层玻璃无所谓, 键盘不能用是致命的。
+    // 【v0.4.3 铁律, 继续生效】找不到按键层 = 不知道玻璃该插在哪, 绝不能插。
+    // 旧代码让 target 停在 0, 结果插到最底层压在按键上面, 用户实测打不了字。
     if (!fg && !overKeys) {
-        if (self.glassLayer) {
-            [self.glassLayer removeFromSuperlayer];
-            self.glassLayer.hidden = YES;
+        if (self.glassView) {
+            [self.glassView removeFromSuperview];
+            self.glassView.hidden = YES;
         }
         return;
     }
 
-    // 目标下标。overKeys=YES 时插到最上层 (= 按键之上)。
-    NSInteger target = 0;
-    if (overKeys) {
-        target = (NSInteger)hostLayer.sublayers.count;
-    } else {
-        NSInteger li = [hostLayer.sublayers indexOfObject:fg.layer];
-        // fg 是宿主的后代, 理论上一定在 sublayers 里。但层树和 view 树不同步的
-        // 时刻是存在的, 所以 NSNotFound 必须处理 —— 拿它当下标就是越界崩溃。
-        if (li == NSNotFound) return;
-        target = li;
-    }
-    // 下标越界会让 insertSublayer:atIndex: 直接抛异常, 必须在范围内夹一下
-    if (target < 0) target = 0;
-    if (target > (NSInteger)hostLayer.sublayers.count) target = (NSInteger)hostLayer.sublayers.count;
-
-    if (self.glassLayer.superlayer != hostLayer) {
-        [hostLayer insertSublayer:self.glassLayer atIndex:(NSUInteger)target];
-        KGLog(@"玻璃层入位: overKeys=%d host=%@ sublayers=%lu 目标位置=%ld (按键层=%@)",
-              overKeys ? 1 : 0, NSStringFromClass(host.class),
-              (unsigned long)hostLayer.sublayers.count,
-              (long)target, fg ? NSStringFromClass(fg.class) : @"none");
+    // insertSubview:belowSubview: 要求 sibling 关系。fg 可能是宿主的孙辈,
+    // 直接用它会抛异常 —— 必须先取它在宿主下的那个祖先。
+    UIView *anchor = fg ? [self ancestorOf:fg under:host] : nil;
+    if (!anchor && !overKeys) {
+        if (self.glassView.superview) [self.glassView removeFromSuperview];
+        self.glassView.hidden = YES;
         return;
     }
 
-    // 已在宿主里: 平时绝不动它 (避免触发布局), 只在 z 序与目标不符时纠正。
-    // 这里必须**每次都校正**而不是「纠正一次」—— 因为用户随时可能切这个开关,
-    // 而键盘重建后 sublayers 数量也会变, 一次性纠正会被这些变化打失效。
-    NSInteger gi = [hostLayer.sublayers indexOfObject:self.glassLayer];
-    if (gi == NSNotFound) return;
-    if (gi != target) {
-        KGLog(@"玻璃层 z 序需纠正: %ld -> %ld (overKeys=%d)", (long)gi, (long)target, overKeys ? 1 : 0);
-        [hostLayer insertSublayer:self.glassLayer atIndex:(NSUInteger)target];
+    if (self.glassView.superview != host) {
+        if (overKeys || !anchor) {
+            [host addSubview:self.glassView];
+        } else {
+            [host insertSubview:self.glassView belowSubview:anchor];
+        }
+        KGLog(@"玻璃视图入位: overKeys=%d host=%@ subviews=%lu anchor=%@",
+              overKeys ? 1 : 0, NSStringFromClass(host.class),
+              (unsigned long)host.subviews.count,
+              anchor ? NSStringFromClass(anchor.class) : @"none(置顶)");
+        return;
     }
+
+    // 已在宿主里: 平时绝不动它 (避免触发布局反馈循环), 只在 z 序与目标不符时纠正。
+    // 必须**每次都校正** —— 用户随时可能切这个开关, 键盘重建后 subviews 也会变,
+    // 一次性纠正会被这些变化打失效。
+    NSUInteger currentIndex = [host.subviews indexOfObject:self.glassView];
+    if (currentIndex == NSNotFound) return;
+
+    NSInteger targetIndex;
+    if (overKeys || !anchor) {
+        targetIndex = (NSInteger)host.subviews.count - 1;
+    } else {
+        targetIndex = (NSInteger)[host.subviews indexOfObject:anchor];
+        if (targetIndex == (NSInteger)NSNotFound) return;
+    }
+    if (targetIndex < 0) targetIndex = 0;
+    if (targetIndex > (NSInteger)host.subviews.count - 1) {
+        targetIndex = (NSInteger)host.subviews.count - 1;
+    }
+
+    if ((NSInteger)currentIndex != targetIndex) {
+        KGLog(@"玻璃视图 z 序需纠正: %lu -> %ld (overKeys=%d)",
+              (unsigned long)currentIndex, (long)targetIndex, overKeys ? 1 : 0);
+        if (overKeys || !anchor) {
+            [host addSubview:self.glassView];
+        } else {
+            [host insertSubview:self.glassView belowSubview:anchor];
+        }
+    }
+}
+
+// 从 view 往上找到 host 那一层祖先 (host 的直接孩子)。找不到返回 nil。
+// insertSubview:belowSubview: 只接受兄弟, 拿不到这一层就不能插。
+- (UIView *)ancestorOf:(UIView *)view under:(UIView *)host {
+    if (!view || !host) return nil;
+    UIView *cur = view;
+    NSUInteger guard = 0;
+    while (cur && guard++ < 40) {
+        if (cur.superview == host) return cur;
+        if (cur == host) return nil;
+        cur = cur.superview;
+    }
+    return nil;
 }
 
 // 隐藏 / 恢复原生背景层。
@@ -695,24 +741,27 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 }
 
 - (void)applyStyleForMaterial:(KGMaterial)material {
-    if (!self.glassLayer) return;
+    if (!self.glassView) return;
     BOOL dark = (self.hostView.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
     KGStyle style = [KGPrefs styleForMaterial:material dark:dark];
     BOOL outline = [KGPrefs showLayerOutline];
     if (self.hasAppliedStyle && KGStyleEqual(style, self.appliedStyle)
-        && self.glassLayer.showOutline == outline) {
+        && self.glassView.showOutline == outline) {
         return;
     }
     self.appliedStyle = style;
     self.hasAppliedStyle = YES;
-    self.glassLayer.showOutline = outline;
-    [self.glassLayer applyStyle:style dark:dark];
+    self.glassView.showOutline = outline;
+    [self.glassView applyStyle:style dark:dark];
 }
 
 - (void)writeInstallProbeWithHost:(UIView *)host material:(KGMaterial)material mode:(KGWorkMode)mode {
     UIView *fg = KGModeShowsGlass(mode) ? [self firstKeyLayerInHost:host] : nil;
-    NSInteger gi = self.glassLayer ? [host.layer.sublayers indexOfObject:self.glassLayer] : NSNotFound;
-    NSInteger fi = fg ? [host.layer.sublayers indexOfObject:fg.layer] : NSNotFound;
+    // v0.5.0: 玻璃从 layer 变成 view, 下标要在 subviews / sublayers 两边都记一份。
+    // 两边对不上就说明 view 树和 layer 树不同步, 那正是「看不见」的高发场景。
+    NSInteger vi = self.glassView ? [host.subviews indexOfObject:self.glassView] : NSNotFound;
+    NSInteger li = self.glassView ? [host.layer.sublayers indexOfObject:self.glassView.layer] : NSNotFound;
+    NSInteger fi = fg ? [host.subviews indexOfObject:[self ancestorOf:fg under:host]] : NSNotFound;
     // 被锁定的那一层背景 (v0.4.1 起恒为单层)
     UIView *bg = self.cachedBackdrop;
     NSNumber *bgOrigin = bg ? [self.hiddenBackdrops objectForKey:bg] : nil;
@@ -722,49 +771,52 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
            bgOrigin ? bgOrigin.doubleValue : -1.0, bg.alpha]
         : @"none";
 
-    // 玻璃层正下方那三层是谁 —— 玻璃是 backdrop 层, 采样源就在它下面。
-    // 如果这三层里有东西仍然不透明, 玻璃就采不到键盘外面的画面。
+    // 玻璃正下方那三层是谁 —— 玻璃是 backdrop, 采样源就在它下面。
+    // 如果这几层里有东西仍然不透明, 玻璃就采不到键盘外面的画面。
     //
     // KG_PROBE_CRASH (v0.4.2 安全模式实锤, 优先级最高):
-    //   这里的 `if (gi > 0)` 挡不住 NSNotFound —— NSNotFound 是 NSUIntegerMax,
+    //   `if (vi > 0)` 挡不住 NSNotFound —— NSNotFound 是 NSUIntegerMax,
     //   强转成 NSInteger 后是 18446744073709551615, 它**大于 0**, 条件照样成立。
     //   于是循环从 i = NSNotFound-1 开始, 拿它去下标 subs 立刻 NSRangeException。
-    //   而 gi 恰好在「玻璃层不存在」时等于 NSNotFound —— 也就是 Probe 档
+    //   而 vi 恰好在「玻璃不存在」时等于 NSNotFound —— 也就是 Probe 档
     //   (v0.4.1 的默认档!) 每次布局都必崩。崩溃发生在 layoutSubviews 里,
     //   键盘一起就崩 → 反复重启 → 安全模式。
     //   教训: **拿 NSNotFound 当下标用, 不能靠 `> 0` 判**, 必须显式比 NSNotFound。
     NSMutableString *underDesc = [NSMutableString string];
-    NSArray<CALayer *> *subs = host.layer.sublayers;
-    if (gi != NSNotFound && gi > 0 && gi <= (NSInteger)subs.count) {
-        for (NSInteger i = gi - 1; i >= 0 && i >= gi - 3; i--) {
-            CALayer *l = subs[(NSUInteger)i];
-            [underDesc appendFormat:@"[%ld]%@ hidden=%d opacity=%.2f ",
-                (long)i, NSStringFromClass(l.class), l.hidden ? 1 : 0, l.opacity];
+    NSArray<UIView *> *subs = host.subviews;
+    if (vi != NSNotFound && vi > 0 && vi <= (NSInteger)subs.count) {
+        for (NSInteger i = vi - 1; i >= 0 && i >= vi - 3; i--) {
+            UIView *v = subs[(NSUInteger)i];
+            [underDesc appendFormat:@"[%ld]%@ a=%.2f h=%d ",
+                (long)i, NSStringFromClass(v.class), v.alpha, v.hidden ? 1 : 0];
         }
     }
     if (underDesc.length == 0) [underDesc appendString:@"none"];
 
-    NSString *signature = [NSString stringWithFormat:@"%@|%@|%@|%ld|%ld|%ld",
+    NSString *signature = [NSString stringWithFormat:@"%@|%@|%@|%ld|%ld|%ld|%ld",
         NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
-        bg ? NSStringFromClass(bg.class) : @"none", (long)gi, (long)fi, (long)mode];
+        bg ? NSStringFromClass(bg.class) : @"none",
+        (long)vi, (long)li, (long)fi, (long)mode];
     if ([signature isEqualToString:self.lastProbeSignature]) return;
     self.lastProbeSignature = signature;
     if (self.probeCount++ > 60) return;
 
     KGWriteProbe([NSString stringWithFormat:
-        @"[install %@] mode=%ld host=%@ hostFrame=%@ onScreen=%d glassLayerIdx=%ld/%lu fg=%@(layer %ld) fgDepth=%ld hideNative=%d material=%ld blur=%.1f refraction=%.1f highlight=%.2f veil=%.2f radius=%.1f outline=%d\n"
-        @"         hiddenBg=%@\n"
+        @"[install %@] mode=%ld host=%@ hostFrame=%@ onScreen=%d glassViewIdx=%ld/%lu glassLayerIdx=%ld/%lu fg=%@ subIdx=%ld fgDepth=%ld hiddenBg=%@\n"
+        @"         blurStyle=%.1f refraction=%.1f highlight=%.2f veil=%.2f radius=%.1f outline=%d material=%ld dark=%d\n"
         @"         underGlass=%@\n",
         [NSDate date], (long)mode,
         NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
         KGIsOnScreen(host),
-        (long)gi, (unsigned long)host.layer.sublayers.count,
+        (long)vi, (unsigned long)host.subviews.count,
+        (long)li, (unsigned long)host.layer.sublayers.count,
         fg ? NSStringFromClass(fg.class) : @"none", (long)fi, (long)KGDepthOfView(fg, host),
-        [KGPrefs hideNativeBackdrop], (long)material,
+        bgDesc,
         self.appliedStyle.blur, self.appliedStyle.refraction,
         self.appliedStyle.highlight, self.appliedStyle.veil,
         self.appliedStyle.cornerRadius, [KGPrefs showLayerOutline],
-        bgDesc, underDesc]);
+        (long)material, self.appliedStyle.dark,
+        underDesc]);
 }
 
 - (void)restoreNativeBackdrops {
@@ -781,9 +833,9 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 }
 
 - (void)teardown {
-    if (self.glassLayer) {
-        [self.glassLayer removeFromSuperlayer];
-        self.glassLayer = nil;
+    if (self.glassView) {
+        [self.glassView removeFromSuperview];
+        self.glassView = nil;
         self.hasAppliedStyle = NO;
     }
     [self restoreNativeBackdrops];
@@ -831,7 +883,7 @@ static NSArray<NSString *> *KGBackdropClassHints(void) {
 
 - (void)legacyRefreshWithRoot:(UIView *)root {
     if (!KGModeShowsGlass([KGPrefs workMode])) return;   // 只有「插玻璃层」的档位才动视图
-    if (self.glassLayer.superlayer != nil) return;       // 已经装好了, 别乱动
+    if (self.glassView.superview != nil) return;         // 已经装好了, 别乱动
 
     UIView *found = [self findBackdropByNameIn:root];
     if (!found) return;
@@ -841,29 +893,22 @@ static NSArray<NSString *> *KGBackdropClassHints(void) {
     if (!host) return;
 
     KGLog(@"兜底路径命中背板 %@", NSStringFromClass(found.class));
-    if (!self.glassLayer) {
-        self.glassLayer = [[KGGlassLayer alloc] init];
+    if (!self.glassView) {
+        self.glassView = [[KGGlassView alloc] initWithFrame:host.bounds];
         self.hasAppliedStyle = NO;
     }
-    self.glassLayer.frame = found.frame;
+    self.glassView.frame = host.bounds;
 
     // v0.4.3: 同样修掉「找不到按键层就插 index 0」的坏行为。
-    // 找不到 = 不知道插哪, 那就不插。少一层玻璃无所谓, 键盘不能���是致命的。
+    // 找不到 = 不知道插哪, 那就不插。少一层玻璃无所谓, 键盘不能用是致命的。
     UIView *fg = [self firstKeyLayerInHost:host];
-    if (!fg) {
-        KGLog(@"兜底路径找不到按键层, 放弃插玻璃层");
+    UIView *anchor = fg ? [self ancestorOf:fg under:host] : nil;
+    if (!anchor) {
+        KGLog(@"兜底路径找不到按键层, 放弃插玻璃");
         return;
     }
-    NSInteger li = [host.layer.sublayers indexOfObject:fg.layer];
-    if (li == NSNotFound) {
-        KGLog(@"兜底路径按键层不在 sublayers 里, 放弃插玻璃层");
-        return;
-    }
-    NSInteger target = li;
-    if (target < 0) target = 0;
-    if (target > (NSInteger)host.layer.sublayers.count) target = (NSInteger)host.layer.sublayers.count;
-    [host.layer insertSublayer:self.glassLayer atIndex:(NSUInteger)target];
-    self.glassLayer.hidden = NO;
+    [host insertSubview:self.glassView belowSubview:anchor];
+    self.glassView.hidden = NO;
 
     self.hostView = host;
     [self enforceNativeBackdropStateInHost:host];

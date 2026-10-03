@@ -7,22 +7,30 @@ NSString * const KGPrefsSuiteName = @"com.banli.keyboardglass.preferences";
 // 早期版本取的是 GlassSuiteX 的默认 (模糊 5 / 折射 9 / 高光 0.51 / 底色 0),
 // 但那是给「通知横幅」调的 —— 键盘底下是整块 App 内容, 那组数值放在键盘上
 // 几乎等于全透明, 用户完全看不出装了插件。这里换成在键盘上肉眼可辨的一组。
-static const CGFloat kKGDefaultBlur         = 12.0;
-static const CGFloat kKGDefaultRefraction   = 10.0;
-static const CGFloat kKGDefaultHighlight    = 0.65;
-// v0.4.0 从 0.30 提到 0.42: 隐藏原生背板之后, 键盘底色全靠玻璃层的 veil 撑着。
-// 0.30 × 0.65 = 0.195 的白几乎等于没有, 键盘透出底下的 App 内容会直接影响
-// 按键文字的可读性, 用户也会怀疑「是不是没生效」。0.42 → 0.273, 既有明显
-// 的玻璃感, 又保证字看得清。
-static const CGFloat kKGDefaultVeil         = 0.42;
-// 默认 0: 先不做圆角。圆角会让键盘四角露出下层内容, 而原生背板仍是直角,
-// 两者叠加反而难看 —— 等基础材质确认无误后再作为第二步开启。
-static const CGFloat kKGDefaultCornerRadius = 0.0;
+//
+// 【v0.5.0 关键修正】模糊从 12 提到 18, 并且**任何情况下都不允许为 0**。
+// 实测日志实锤用户存档里 blur=0.0:
+//     [install ...] blur=0.0 refraction=10.0 highlight=0.65 veil=0.42
+// 旧版 blur 是直接喂给 CABackdropLayer 的 radius 的, 0 就等于「完全不采背景」——
+// 玻璃整个关掉, 屏幕上只剩下 veil 的一点白。用户看到的「完全透明」就是这一条。
+// 现在 blur 走 UIVisualEffectView 的档位映射, 最低档 (ThinMaterial) 也带雾感。
+static const CGFloat kKGDefaultBlur         = 18.0;
+static const CGFloat kKGDefaultRefraction   = 14.0;
+static const CGFloat kKGDefaultHighlight    = 0.55;
+// v0.5.0 从 0.42 提到 0.52: 玻璃的「可见度」主要靠底色, 0.42 在浅色 App 上
+// 压不住底下的文字。0.52 既有明显玻璃感, 又保证按键字看得清。
+static const CGFloat kKGDefaultVeil         = 0.52;
+// v0.5.0 圆角从 0 提到 10: iOS 26 的键盘玻璃四角是圆的, 直角永远差那口气。
+// 只圆上面两个角, 下面贴屏幕底边。
+static const CGFloat kKGDefaultCornerRadius = 10.0;
 
 // 参数版本号。1 = 早期那组不可见的默认值; 2 = 液态玻璃推荐值;
 // 3 = 二分隔离结束, 工作模式默认切到「完整」;
-// 4 = v0.4.0 批量藏背景导致键盘哑掉, 默认退回「纯探针」(用户实测能打字的那档)。
-static const NSInteger kKGParamsVersion = 4;
+// 4 = v0.4.0 批量藏背景导致键盘哑掉, 默认退回「纯探针」(用户实测能打字的那档);
+// 5 = v0.5.0 换 UIVisualEffectView 架构, 模糊/底色/圆角全部换新默认。
+//     **必须升**: 用户存档里的 blur=0.0 是旧架构的产物, 不迁移的话
+//     换架构之后依然是 0, 用户会以为新版本也没生效。
+static const NSInteger kKGParamsVersion = 5;
 
 static BOOL kKGDebugEnabled = NO;
 
@@ -84,14 +92,16 @@ void KGLog(NSString *format, ...) {
     [d setObject:@(kKGDefaultVeil)       forKey:@"LiquidVeil"];
     [d setObject:@(kKGDefaultCornerRadius) forKey:@"CornerRadius"];
     [d setObject:@YES                    forKey:@"HideNativeBackdrop"];
-    // v0.4.1: 退回「纯探针」。
+    [d setObject:@NO                     forKey:@"GlassOverKeys"];
+    // v0.4.1 起退回「纯探针」, v0.5.0 继续保持。
     //
     // v0.3.0 我把默认设成 Full, 理由是「玻璃层是纯 CALayer, 不可能挡触摸」——
     // 这个理由是错的, 而且从没被验证过: 用户说「能打字」时用的是 Probe/Hide 档,
     // 那两档根本不插玻璃层。v0.4.0 上了 Full 档后用户立刻反馈「又不能点击了」。
     //
-    // 教训: 「机制上不可能」不等于「实测不会」。默认档必须是**用户亲自验证过
-    // 能打字**的那一档, 把完整档留给用户按需开启, 不能替他冒这个险。
+    // v0.5.0 玻璃层从 CALayer 换成了 UIView, 触摸安全从「layer 天生不参与命中」
+    // 换成「显式 userInteractionEnabled=NO」。机制上更硬, 但**依然没实测过**。
+    // 铁律不变: 默认档必须是用户亲自验证过能打字的那一档。
     [d setObject:@(KGWorkModeProbe)        forKey:@"WorkMode"];
     [d synchronize];
 }
@@ -161,6 +171,12 @@ void KGLog(NSString *format, ...) {
     if (s.veil > 1)         s.veil = 1;
     if (s.cornerRadius < 0) s.cornerRadius = 0;
     if (s.cornerRadius > 40) s.cornerRadius = 40;
+
+    // 【v0.5.0】模糊不许为 0。
+    // 旧架构下 blur 直接当 backdrop 的 radius, 0 = 整个玻璃关掉, 屏幕全透明。
+    // 用户实测存档里就是 blur=0.0, 这是「没达到预期效果」最直接的一条原因。
+    // 新架构下最低档也带雾感, 但仍然把 0 兜到 1, 不给「看起来像没生效」留余地。
+    if (s.blur < 1.0)       s.blur = 1.0;
     return s;
 }
 
