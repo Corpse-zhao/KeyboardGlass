@@ -1084,21 +1084,45 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     // 锁定: 第一次找到就认下来, 之后只在它离树时才重选(键盘重建会换一批视图)。
     if (!self.cachedGestureOverlay || !self.cachedGestureOverlay.superview) {
         self.cachedGestureOverlay = nil;
-        for (UIView *v in container.subviews) {
-            NSString *n = NSStringFromClass(v.class);
-            if (![n hasPrefix:@"UIEditingOverlayGestureView"]) continue;
-            if (!v.userInteractionEnabled) continue;
-            CGRect f = v.frame;
-            CGFloat area = f.size.width * f.size.height;
-            if (area < screenArea * 0.85) continue;
-            self.cachedGestureOverlay = v;
-            break;
+        // BFS 而不是只看直接孩子: 探针里它与宿主是兄弟(同在
+        // UIInputSetContainerView 下), 但这个层级在不同iOS 版本 / 不同
+        // 键盘状态下不保证稳定(宿主自己也会被包一层)。只看subviews
+        // 漏掉了就前功尽弃, 而漏掉的表现恰好是「症状没变」——
+        // 不想再重复一次 v0.7.3 那种「以为改了其实没生效」。
+        NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:container];
+        NSUInteger guard = 0;
+        while (queue.count > 0 && guard++ < 200) {
+            UIView *current = queue.firstObject;
+            [queue removeObjectAtIndex:0];
+            if (!current) continue;
+
+            for (UIView *v in current.subviews) {
+                NSString *n = NSStringFromClass(v.class);
+                // hasPrefix 而不是 contains: 这类视图可能有子类
+                // (UIEditingOverlayGestureView 的派生类), 只认前缀会漏。
+                if ([n hasPrefix:@"UIEditingOverlayGestureView"] && v.userInteractionEnabled) {
+                    CGFloat area = v.frame.size.width * v.frame.size.height;
+                    if (area >= screenArea * 0.85) {
+                        self.cachedGestureOverlay = v;
+                        break;
+                    }
+                }
+            }
+            if (self.cachedGestureOverlay) break;
+            [queue addObjectsFromArray:current.subviews];
         }
+
         if (self.cachedGestureOverlay) {
             KGLog(@"锁定全屏手势覆盖层 %@ frame=%@ uie=%d",
                   NSStringFromClass(self.cachedGestureOverlay.class),
                   NSStringFromCGRect(self.cachedGestureOverlay.frame),
                   self.cachedGestureOverlay.userInteractionEnabled);
+        } else {
+            // 找不到也要说: 「没锁定」和「锁定了但没生效」是两个完全不同的
+            // 故障, 混在一起就会重演 v0.7.3 那种「不知道有没有生效」的糊涂账。
+            KGLog(@"没找到全屏手势覆盖层 (容器 %@ 直接孩子 %lu 个)",
+                  NSStringFromClass(container.class),
+                  (unsigned long)container.subviews.count);
         }
     }
 
