@@ -28,6 +28,9 @@
 @property (nonatomic, assign) BOOL darkMode;
 @property (nonatomic, assign) BOOL showOutline;
 
+// 当前生效的 UIBlurEffect 档位。模糊本体建起来没有、用的第几档, 看这一个数字。
+@property (nonatomic, readonly) NSInteger activeEffectStyle;
+
 - (void)applyStyle:(KGStyle)style dark:(BOOL)dark;
 
 @end

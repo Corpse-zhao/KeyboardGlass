@@ -803,7 +803,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 
     KGWriteProbe([NSString stringWithFormat:
         @"[install %@] mode=%ld host=%@ hostFrame=%@ onScreen=%d glassViewIdx=%ld/%lu glassLayerIdx=%ld/%lu fg=%@ subIdx=%ld fgDepth=%ld hiddenBg=%@\n"
-        @"         blurStyle=%.1f refraction=%.1f highlight=%.2f veil=%.2f radius=%.1f outline=%d material=%ld dark=%d\n"
+        @"         blurStyle=%.1f effect=%ld refraction=%.1f highlight=%.2f veil=%.2f radius=%.1f outline=%d material=%ld dark=%d\n"
         @"         underGlass=%@\n",
         [NSDate date], (long)mode,
         NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
@@ -812,7 +812,8 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         (long)li, (unsigned long)host.layer.sublayers.count,
         fg ? NSStringFromClass(fg.class) : @"none", (long)fi, (long)KGDepthOfView(fg, host),
         bgDesc,
-        self.appliedStyle.blur, self.appliedStyle.refraction,
+        self.appliedStyle.blur, (long)self.glassView.activeEffectStyle,
+        self.appliedStyle.refraction,
         self.appliedStyle.highlight, self.appliedStyle.veil,
         self.appliedStyle.cornerRadius, [KGPrefs showLayerOutline],
         (long)material, self.appliedStyle.dark,

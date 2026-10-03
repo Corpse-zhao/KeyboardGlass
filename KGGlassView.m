@@ -37,6 +37,9 @@ static UIBlurEffectStyle KGEffectStyleForBlur(CGFloat blur, BOOL dark) {
 
 @interface KGGlassView ()
 @property (nonatomic, strong) UIVisualEffectView *blurView;
+// 当前生效的 UIBlurEffect 档位。给探针用: 模糊本体有没有建起来、用的第几档,
+// 看这一个数字就够, 不用去猜「到底有没有模糊」。
+@property (nonatomic, assign) NSInteger activeEffectStyle;
 // 底色。玻璃要「看得见」主要靠它, 模糊只是锦上添花。
 @property (nonatomic, strong) CALayer *veilLayer;
 // 顶部高光带: iOS 26 玻璃最有辨识度的特征就是上边缘被顶起的那道亮边。
@@ -148,10 +151,14 @@ static UIBlurEffectStyle KGEffectStyleForBlur(CGFloat blur, BOOL dark) {
 
     // ---- 模糊本体 ----
     // effect 换档必须走 setNeedsLayout, 直接改会闪。
-    UIBlurEffect *effect = [UIBlurEffect
-        effectWithStyle:KGEffectStyleForBlur(style.blur, dark)];
+    UIBlurEffectStyle wanted = KGEffectStyleForBlur(style.blur, dark);
+    UIBlurEffect *effect = [UIBlurEffect effectWithStyle:wanted];
     if (![self.blurView.effect isEqual:effect]) {
         self.blurView.effect = effect;
+        // 模糊本体的存在性是这一版最需要确认的事: v0.4.x 用 CABackdropLayer
+        // 采不到别的窗口, 玻璃等于全透明。这次换成 UIVisualEffectView,
+        // 把用的第几档记下来, 用户只要发探针文件回来, 就不用再靠猜。
+        _activeEffectStyle = wanted;
     }
     self.blurView.frame = bounds;
 
