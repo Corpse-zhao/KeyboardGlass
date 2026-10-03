@@ -8,9 +8,9 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>给键盘换上 iOS 26 风格的玻璃材质。3.0.0 是推翻重做版：之前十三版一直找不到该改的层，这一版靠 253MB 探针数据定位到了真正的目标，重新写了一遍。
+			<string>给键盘换上 iOS 26 风格的玻璃材质。3.0.1 是安全修正版：上一版去改了一个 iOS 自己的视图（系统键盘底板），装上后可能出现系统异常，这一版把那处改动撤掉了，改用不触碰系统视图的方式达到同样效果。
 
-**装上就有效果，不用改任何设置。** 如果键盘看起来和原来没区别，先把「底板白度」往左拖 —— 那是这一版真正起作用的那一处。</string>
+如果你还没装过 3.0.0，直接装这个版本即可，效果完全一样。</string>
 			<key>label</key>
 			<string>键盘液态玻璃</string>
 		</dict>
@@ -63,44 +63,6 @@
 				<integer>2</integer>
 				<integer>3</integer>
 			</array>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>footerText</key>
-			<string>**这一版最重要的一处。**
-
-系统键盘自己在整个键盘区铺了一层白（探针实测：颜色是白，透明度 0.10），这就是键盘看起来「实心浅灰」的真正原因。之前的版本一直在调旁边那个模糊层（效果图层），调错了对象，所以怎么拖都没变化。
-
-这个滑块直接就是那层白的浓度：**0 = 完全透明，键缝里能看清下面 App 的内容；0.10 = 系统原样。** 默认 0.03，保留一点点白以保证按键上的字还读得清。
-
-往左拖会明显更通透。</string>
-			<key>label</key>
-			<string>底板白度</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSStaticTextCell</string>
-			<key>cellClass</key>
-			<string>KGSliderCell</string>
-			<key>default</key>
-			<real>0.03</real>
-			<key>defaults</key>
-			<string>com.banli.keyboardglass.preferences</string>
-			<key>get</key>
-			<string>readPreferenceValue:</string>
-			<key>key</key>
-			<string>BackdropWhiteness</string>
-			<key>label</key>
-			<string>底板白度（最有效）</string>
-			<key>max</key>
-			<real>0.3</real>
-			<key>min</key>
-			<real>0.0</real>
-			<key>set</key>
-			<string>setPreferenceValue:specifier:</string>
-			<key>showValue</key>
-			<true/>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -314,9 +276,10 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>板栗仁 · KeyboardGlass 3.0.0
+			<string>板栗仁 · KeyboardGlass 3.0.1
 
-3.0.0：推翻重做。靠探针数据定位到真正的目标层（系统铺在键盘区的那层白），引擎整个重写。
+3.0.1：安全修正版。撤回了对系统键盘底板（UIKBBackdropView）的修改，改用玻璃层盖住那层白——视觉上没有损失，但全程不触碰任何 iOS 自己的视图。
+3.0.0：推翻重做。靠探针数据定位到真正的目标层，引擎整个重写。
 2.0.0：纯探针版，只看不改。
 1.1.0：把五处改动拆成五个开关做二分排查。
 1.0.0：确立「只改纯视觉层」这条铁律。</string>

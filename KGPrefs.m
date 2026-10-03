@@ -50,7 +50,11 @@ static const CGFloat kKGDefaultCornerRadius = 10.0;
 //        默认值。默认值本身设成「肉眼可辨」, 所以不迁移也能出效果。
 //     c) 十三版攒下的 GlassTransparency/KeyplaneDim 是按「调效果图层」
 //        的语义拖出来的, 那个方向已被数据证伪, 必须重置回推荐值。
-static const NSInteger kKGParamsVersion = 11;
+// 12 = v3.0.1 撤回「底板白度」(BackdropWhiteness) —— 它在 v3.0.0 里会去写
+//     `UIKBBackdropView`(uie=1 系统视图)的 backgroundColor, 而用户装 v3.0.0
+//     后出现疑似系统异常。v3.0.1 改用「玻璃盖住那层白」, 不再碰系统底板,
+//     所以这个滑块整个作废, 从面板与存档里一并清掉。
+static const NSInteger kKGParamsVersion = 12;
 
 // v1.0.0: 玻璃通透度默认值。系统那层浓白调淡 65% —— 留 35% 压住, 保证
 // 按键上的白字在浅色 App 背景下仍然读得清。拖到 1.0 玻璃感最强。
@@ -60,11 +64,8 @@ static const CGFloat kKGDefaultGlassTransparency = 0.65;
 // 决定「按键区透不透」。0.7 调淡 70% 留 30% 底色, 键缝能透出玻璃。
 static const CGFloat kKGDefaultKeyplaneDim = 0.70;
 
-// v3.0.0: 底板白度默认值。系统原本 0.10, 这里给 0.03 ——
-// 「明显比系统通透」但「按键字还读得清」的那一档。
-// 定这个值的依据: 探针实测 bg=1.00/1.00/1.00/0.10, 铺满整个键盘区。
-// 调到 0 会让浅色 App 上的按键白字失去对比度, 用户会以为按键坏了。
-static const CGFloat kKGDefaultBackdropWhiteness = 0.03;
+// 【v3.0.1 已删除】kKGDefaultBackdropWhiteness —— 底板白度整体作废。
+
 
 static BOOL kKGDebugEnabled = NO;
 
@@ -110,13 +111,6 @@ void KGLog(NSString *format, ...) {
         @"DebugLog":           @NO,
         @"ShowLayerOutline":   @NO,
 
-        // ---- v3.0.0: 底板白度 ----
-        // 系统在 UIKBBackdropView 上铺的那层白, 探针实测 bg=1.00/1.00/1.00/0.10。
-        // 0.10 已经很淡, 但键盘整体观感仍偏"实心浅灰" —— 因为它铺的是
-        // **整个键盘区**。往上调(更白) = 更实心; 往下调(更透) = 玻璃感。
-        // 默认 0.03: 保留一点点白以维持按键文字对比度, 同时明显比 0.10 通透。
-        // 调0 就是全透, 键缝能看清下层 App 内容, 但浅色App 上按键字会发飘。
-        @"BackdropWhiteness":  @(kKGDefaultBackdropWhiteness),
     }];
     // v1.0.0: WorkMode / GlassOverKeys 已彻底废弃, 这里**不注册**。
     // 注册一个永远没人读的下拉项, 只会让人拖到「纯探针」档以为插件没生效。
@@ -154,11 +148,11 @@ void KGLog(NSString *format, ...) {
     for (NSString *dead in @[@"SafeMode", @"ActionGlass", @"ActionVeil",
                              @"ActionAssistantBar", @"ActionKeyBottom",
                              @"ActionFullscreenWhite",
-                             @"ExtProbe", @"HostKeyboardActions"]) {
+                             @"ExtProbe", @"HostKeyboardActions",
+                             // v3.0.1 新增作废: 它会去写 uie=1 的系统底板
+                             @"BackdropWhiteness"]) {
         [d removeObjectForKey:dead];
     }
-    // v3.0.0: 唯一的新参数 —— 底板白度。
-    [d setObject:@(kKGDefaultBackdropWhiteness) forKey:@"BackdropWhiteness"];
     [d synchronize];
 }
 
@@ -279,21 +273,6 @@ void KGLog(NSString *format, ...) {
 
 + (CGFloat)keyplaneDim {
     CGFloat v = [[self defaults] doubleForKey:@"KeyplaneDim"];
-    if (v < 0) v = 0;
-    if (v > 1) v = 1;
-    return v;
-}
-
-// ---- v3.0.0: 底板白度 ----
-// 语义: 直接就是 UIKBBackdropView 那层白的 alpha。0 = 全透, 1 = 全白。
-// 不用再像 GlassTransparency 那样绕一层「调淡比例」—— 那个间接映射
-// 是十三版「调了半天看不出变化」的帮凶之一。这里给什么值就是什么值。
-+ (CGFloat)backdropWhiteness {
-    NSUserDefaults *d = [self defaults];
-    if ([d objectForKey:@"BackdropWhiteness"] == nil) {
-        return kKGDefaultBackdropWhiteness;
-    }
-    CGFloat v = [d doubleForKey:@"BackdropWhiteness"];
     if (v < 0) v = 0;
     if (v > 1) v = 1;
     return v;

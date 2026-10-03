@@ -2,9 +2,71 @@
 #import "KGGlassView.h"
 #import <QuartzCore/QuartzCore.h>
 #import <math.h>
+// 崩溃陷阱要用的一组 POSIX 头。signal/open/read/write/mkdir 都出自这里。
+// 单独列出来是为了让「信号处理器只用这批函数」这件事在 include 层面就一目了然。
+#import <signal.h>
+#import <fcntl.h>
+#import <unistd.h>
+#import <sys/stat.h>
+#import <stdlib.h>
 
 // ======================================================================
-// 【v3.0.0 —— 推翻重做】
+// 【v3.0.1 —— 撤回 v3.0.0 唯一一处越界动作, 并给熔断器接上信号处理器】
+// ======================================================================
+//
+// v3.0.0 交付后用户反馈: 疑似系统异常(自己描述「注销」), 已卸载。
+// **具体现象用户也说不清。** 于是这次不靠猜, 而是把 v3.0.0 里
+// 唯一一处「没有证据支撑就破铁律」的动作撤掉。
+//
+// 【撤掉的是什么】
+// v3.0.0 做两件事:
+//   A. 写`UIKBBackdropView`(系统底板, **uie=1**)的 backgroundColor
+//   B. 把玻璃层插到 `UIKBInputBackdropView` 里
+// v3.0.1 只保留 B, 且把 B 的入位父层从「底板的父层」换成
+// **`UIKBInputBackdropView` 本身**(uie=0), A 整个停用。
+//
+// 【为什么撤 A —— 理由不是「它一定有问题」, 而是「我没资格碰它」】
+// v1.0.0 立的铁律: **只允许改 uie=0 的层。** 十三版有两次安全模式
+// (v0.4.1 / v0.4.2)都来自「改系统视图」, 铁律就是这么来的。
+// v3.0.0 给破例找的理由是「只改 backgroundColor 不改变 hitTest 参与性」——
+// 而这条论证有个**从未验证的前提**: 假定这个属性无人竞争、只有我们在写。
+// 只要系统在别处也写它(深浅色切换、材质切换、键盘形态切换都会重配底板),
+// 就构成一个我看不见的反馈环。**我没有任何证据说它安全, 却已经交付了。**
+//
+// 「机制上不可能」这句话, 在这个项目里已经害我栽了三次(v0.4.1 / v0.5.2 / v3.0.0)。
+// 写在这里, 连同撤回理由一起, 免得下一个人又把它「优化」回去。
+//
+// 【那个 10% 的白怎么办 —— 不去改它, 让玻璃盖住它】
+// 白底的功能是「垫在内容下面让字可读」。玻璃层自带 veil 底色 + 模糊,
+// 插在它上面就等效于把白压下去, 而这个动作作用在 **uie=0** 的层上。
+// **v3.0.0 想要的效果, 不需要碰系统底板就能拿到。**
+// 唯一代价: 玻璃关掉时那10% 白会回来 —— 那是系统本来的样子, 不是 bug。
+//
+// 【v3.0.0 的熔断器是死代码】noteCrash 零调用点, 一次都没触发过。
+// 也就是说真崩了计数永远是 0, 熔断永不打开 —— **一个从不触发的保险丝
+// 等于没有保险丝**。v3.0.1 装上信号处理器(SIGSEGV/SIGABRT/SIGBUS/SIGILL/
+// SIGSTKFLT), 计数落纯文本文件, 且每拍重读, 崩第 5 次的下一拍就自动停手。
+//
+// ----------------------------------------------------------------------
+// 【v3.0.0 的历史, 由 v1.1.0 探针 253MB 全量数据(157 棵全树)定案】
+// 微信输入法态(顶层窗口 UIRemoteKeyboardWindow, 含 SquidExtender.* / TUI*)下实测:
+//
+//   0 UIRemoteKeyboardWindow430x932 uie=1
+//    1 UIInputSetContainerView     430x932 uie=1
+//     2 UIInputSetHostView         {0,576},{430,356} uie=1   ← 宿主, 键盘区
+//      3 UIKBInputBackdropView     430x311 uie=0   ← v3.0.1 玻璃的入位容器
+//       4 UIKBBackdropView         430x311 uie=1 bg=白/0.10   ← 底板, v3.0.1 不碰
+//        5 _UIVisualEffectBackdropView 430x311 uie=0
+//      3 UIKBInputBackdropView     430x45  uie=0
+//       4 UIKBBackdropView         430x45  uie=1 bg=白/0.10
+//        5 _UIVisualEffectBackdropView 430x45  uie=0
+//      3 UIKeyboardAutomatic → UIKeyboardLayoutStar → UIKBKeyplaneView
+//          UIKBSplitImageView x3 (uie=0) / UIKBKeyView x5 (uie=0)
+//
+// 【v3.0.0 查明的两个事实, 仍然有效】
+// 1. 「按键在输入法扩展进程」是**错的** —— 按键层就在宿主进程里, 层级完整。
+// 2. 玻璃层曾经是全屏大小({0,0},{430,932})而键盘只有 356pt 高 ——
+//    比键盘大 5 倍且 z 序在按键之上, 观感是「更浑浊」而不是「更透」。
 // ======================================================================
 //
 // 十三版(以及 v2.0.0)失败的根因, 由v1.1.0 探针的 253MB 原始数据一次性定位:
@@ -57,6 +119,61 @@
 // ======================================================================
 
 NSString * const KGProbeFilePath = @"/var/mobile/Documents/KeyboardGlass/tweak_probe.txt";
+
+// ======================================================================
+// 【v3.0.1】崩溃陷阱 —— 必须在任何 ObjC 对象之前定义
+// ======================================================================
+// 【为什么单独拎出来】信号处理器里**只能用 async-signal-safe 的函数**。
+// NSLog / NSUserDefaults / Objective-C 消息派发全部禁止 —— 崩溃时调用它们
+// 本身就会二次崩溃, 于是「统计崩溃」变成「制造崩溃」。
+// 所以这里只用: open / read / write / close / _exit。
+//
+// 【它要解决什么】v3.0.0 的熔断器写了但**没有任何调用点** ——
+// 一次都没触发过。用户装上后出现疑似系统异常, 而我们当时没有任何
+// 机制能自动止损。现在这个处理器是唯一能在「进程即将死掉」时落盘的地方。
+
+// 崩溃计数文件。两个表示形式必须指向**同一个路径**:
+//   - C 字符串  : 信号处理器里用(async-signal-safe, 不碰 ObjC)
+//   - NSString : 正常路径读写用
+// 写错任何一边, 熔断器就静默失效 —— 所以判据放在 check_offline.py 里核对。
+static const char kKGCrashFile[] =
+    "/var/mobile/Documents/KeyboardGlass/crash_count.txt";
+static NSString * const KGCrashCountPath =
+    @"/var/mobile/Documents/KeyboardGlass/crash_count.txt";
+static const char kKGDir[] = "/var/mobile/Documents/KeyboardGlass";
+
+static void KGSignalHandler(int sig) {
+    // 只做最原始的四件事: 读 → 加一 → 写回 → 走原来的处理。
+    int fd = open(kKGCrashFile, O_RDONLY);
+    int n = 0;
+    if (fd >= 0) {
+        char buf[16] = {0};
+        ssize_t r = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (r > 0) { buf[r] = 0; n = atoi(buf); }
+    }
+    n++;
+    // 目录不存在就建(只试一次, 失败也无所谓 —— 计数只是保险丝)。
+    mkdir(kKGDir, 0755);
+    fd = open(kKGCrashFile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        char out[16];
+        int len = 0;
+        if (n == 0) n = 1;
+        // 手写 itoa, 不用 sprintf —— 后者不保证 async-signal-safe。
+        if (n >= 10) {
+            out[len++] = (char)('0' + (n / 10) % 10);
+        }
+        out[len++] = (char)('0' + n % 10);
+        out[len++] = '\n';
+        ssize_t w = write(fd, out, (size_t)len);
+        (void)w;
+        close(fd);
+    }
+    // 重新拉起默认处理 → 让系统正常记录这次崩溃(报告/安全模式)。
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
 
 // ----------------------------------------------------------------------
 // 探针: 体积封顶 256KB。v1.1.0 那份 253MB 是没封顶的后果,
@@ -127,20 +244,36 @@ static BOOL KGIsKeyboardSized(UIView *v) {
 }
 
 // ======================================================================
-// 【uied 铁律】只碰 uie=1 也安全的唯一前提: **只改 backgroundColor**
+// 【v3.0.1 铁律回滚】不再碰 uie=1 的层 —— 这是硬性约束, 不是判断题
 // ======================================================================
-// v1.0.0 立的铁律是「只碰 uie=0 的层」。v3.0.0 之所以要碰 uie=1 的
-// UIKBBackdropView, 是因为**键盘那块 10% 的白就铺在它身上**, 不调它
-// 就等于没调。
 //
-// 但这条只在**只改 backgroundColor** 的前提下成立:
-//   - 改 backgroundColor 不改变 view 的 hitTest 参与性(UIKit 契约)
-//   - 加/删 subview、改 frame、改 alpha 则会**改变**命中区域, 铁律就破了
-// 所以 v3.0.0 里对 UIKBBackdropView 只写 backgroundColor 一个属性,
-// 绝不碰它别的地方。探针里能核对这一点: uie 始终是 1, 从没变过。
+// v3.0.0 破了自己在 v1.0.0 立的铁律(「只允许改 uie=0 的层」), 去写了
+// `UIKBBackdropView` 的 backgroundColor。用户反馈装上后**疑似系统异常
+// (自己描述为「注销」), 已卸载**。
+//
+// 【为什么撤回这条, 而不是加个 if 开关留着它】
+// v3.0.0 给它找的理由是「只改 backgroundColor 不改变 hitTest 参与性」。
+// 这个论证**有个从未验证过的前提**: 假定 `UIKBBackdropView.backgroundColor`
+// 是一个只由我们写的、无人竞争的属性。**这个假定没有任何证据支撑。**
+// 只要系统自己在别处也写它(切深浅色/材质/键盘形态切换都会重配底板),
+// 就构成一个我们看不见的反馈环: 我写 → 系统覆盖 → 我再写 → ……
+// 而 UIKBBackdropView 是键盘的底板, 它挂在输入视图的主布局链路上。
+//
+// 十三版里有两次安全模式(v0.4.1 / v0.4.2)都来自「改系统视图」,
+// v1.0.0 立这条铁律正是因为那两次。**我没拿到任何新证据就破它, 这次不重复。**
+//
+// 【那个 10% 的白怎么办 —— 用玻璃盖, 不去改它】
+// 白底的功能就是「垫在内容下面让字可读」。玻璃层自带 veil 底色 + 模糊,
+// 盖在白底之上, 视觉上等效于把白压下去, 而**这个操作作用在 uie=0 的层上**。
+// 也就是说: v3.0.0 想要的效果, 不需要碰系统底板就能拿到。
+//
+// **唯一的代价**: 玻璃材质关掉时, 10% 的白会回来(那是系统本来的样子)。
+// 这不是 bug, 是正确的。
 static BOOL KGTouchSafeForColorOnly(UIView *v) {
-    // 纯视觉底板: 类名匹配即可。内部只有一层效果视图, 没有按键/按钮。
-    if (KGClassIs(v, @"UIKBBackdropView")) return YES;
+    // v3.0.1: 恒为 NO。底板**一个字节都不碰**。
+    // 保留这个函数是因为下方 findBackdropIn: 还用它做「跳过」判据,
+    // 改成恒假之后那套找层逻辑自然就整体退出了, 不用改结构。
+    (void)v;
     return NO;
 }
 
@@ -163,8 +296,8 @@ static BOOL KGIsBigEnough(UIView *v, UIView *host) {
 @property (nonatomic, assign) NSInteger sameCount;
 @property (nonatomic, assign) BOOL hasLastFrame;
 
-// 当前生效的目标层
-@property (nonatomic, weak)   UIView *backdropView;   // UIKBBackdropView
+// 当前目标容器
+@property (nonatomic, weak)   UIView *backdropView;   // UIKBInputBackdropView(uie=0)
 // 【类型必须是 KGGlassView *】早先写成 UIView *, 于是 applyStyle: 里调
 // self.glassView.showOutline / applyStyle:dark: 全是"no visible @interface",
 // CI 两个架构同时报错。持有我们自己的类型, 编译器才能帮我们查错。
@@ -175,10 +308,6 @@ static BOOL KGIsBigEnough(UIView *v, UIView *host) {
 
 // 崩溃熔断
 @property (nonatomic, assign) NSInteger crashCount;
-@property (nonatomic, assign) BOOL    crashLoaded;
-
-// 底板原始颜色。还原时要用, 必须在第一次改动**之前**抓住。
-@property (nonatomic, strong) UIColor *savedBackdropColor;
 
 // 探针节流: 状态没变就不重复写文件
 @property (nonatomic, assign) NSInteger tickCount;
@@ -193,19 +322,46 @@ static BOOL KGIsBigEnough(UIView *v, UIView *host) {
     return inst;
 }
 
-// 【不要在 init 里读 NSUserDefaults】+shared 由 %ctor 触发, 那时
-// KGPrefs registerDefaults 还没跑, 读到的全是 0。崩溃计数改成惰性加载。
+// ----------------------------------------------------------------------
+// 崩溃计数 —— v3.0.1 改成读**文件**, 不再读 NSUserDefaults
+// ----------------------------------------------------------------------
+// v3.0.0 用 NSUserDefaults 存计数, 而信号处理器里**绝对不能**碰它
+// (NSUserDefaults 不是 async-signal-safe, 崩溃时调用会二次崩溃)。
+// 于是两边必须用同一个存储: 纯文本文件。
+//
+// 【关键收益】计数落盘之后**不用等进程重启**。v3.0.0 那版即使熔断器
+// 接线成功, 也存在「崩了 → 计数写了 → 但这个进程还活着 → 继续崩」的窗口。
+// 现在每拍都重读文件, 崩第 5 次的**下一拍**就自动停手。
+//
+// 【不要在 init 里读】+shared 由 %ctor 触发, 那时 KGPrefs registerDefaults
+// 还没跑。惰性加载, 且**每次都重读**(文件优先级最高)。
 - (NSInteger)crashCount {
-    if (!self.crashLoaded) {
-        self.crashLoaded = YES;
-        NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:KGPrefsSuiteName];
-        self.crashCount = [d integerForKey:@"CrashCount"];
+    NSInteger n = 0;
+    NSData *d = [NSData dataWithContentsOfFile:KGCrashCountPath];
+    if (d.length > 0) {
+        NSString *s = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+        n = s.integerValue;   // 读不出来就是 0, 安全
     }
-    return self.crashCount;
+    self.crashCount = n;
+    return n;
 }
 
 - (void)setCrashCount:(NSInteger)v {
-    self.crashLoaded = YES;
+    // 只更新内存值。真正的落盘由信号处理器做 —— 它是唯一能在
+    // 「进程即将死掉」时可靠写盘的时机, 正常路径写没有意义。
+    self.crashCount = v;
+}
+
+// 手动写一次(设置面板清零时用)。
+- (void)kg_writeCrashCount:(NSInteger)v {
+    NSString *dir = [KGCrashCountPath stringByDeletingLastPathComponent];
+    NSFileManager *fm = NSFileManager.defaultManager;
+    if (![fm fileExistsAtPath:dir]) {
+        [fm createDirectoryAtPath:dir withIntermediateDirectories:YES
+         attributes:nil error:NULL];
+    }
+    NSString *s = [NSString stringWithFormat:@"%ld\n", (long)MAX(0, v)];
+    [s writeToFile:KGCrashCountPath atomically:YES encoding:NSUTF8StringEncoding error:NULL];
     self.crashCount = v;
 }
 
@@ -232,7 +388,10 @@ static BOOL KGIsBigEnough(UIView *v, UIView *host) {
                                                    block:^(NSTimer *t) {
         [[KGEngine shared] tick];
     }];
-    KGLog(@"引擎已启动(3.0.0), 0.4s 定时器 + 连续两帧相同才动手");
+    KGLog(@"引擎已启动(3.0.1), 0.4s 定时器 + 连续两帧相同才动手");
+    // 【v3.0.1 新增】装上信号处理器 —— 熔断器从此才真的能工作。
+    // 见 kg_installCrashTrap 的说明。
+    [self kg_installCrashTrap];
 }
 
 - (void)stopWorker {
@@ -248,16 +407,48 @@ static BOOL KGIsBigEnough(UIView *v, UIView *host) {
     // 原设计想用「10 分钟内 5 次」来自动恢复, 但 CrashLastTime 存的是
     // NSDate 对象, 一旦用户换机/重装导致读不出来, 熔断就永远解不开 ——
     // 表现就是「插件明明装了却啥也不干」, 比崩一次更难排查。
-    // 设置面板每次打开都会清零计数(KGRootListController 里无条件remove),
+    // 设置面板每次打开都会清零计数(KGRootListController 里无条件 remove),
     // 所以「装新版→开设置→就恢复」这条路是通的, 不需要时间窗。
     return [self crashCount] >= 5;
 }
 
 - (void)noteCrash {
-    self.crashCount = [self crashCount] + 1;
-    NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:KGPrefsSuiteName];
-    [d setObject:@([self crashCount]) forKey:@"CrashCount"];
-    KGLog(@"崩溃计数 = %ld(达到 5 就熔断)", (long)[self crashCount]);
+    // 【v3.0.1 改口径】原来这里写的是 NSUserDefaults 的 `CrashCount`,
+    // 而 circuitOpen 读的是**文件**(信号处理器只能碰文件)。两处各写一份,
+    // 判定只认文件 —— 于是这个方法写下去的东西**没有任何人读**,
+    // 是一个「看着在工作、实际不参与判定」的陷阱。
+    // 现在两条路(信号处理器 / 正常路径)统一写同一个文件。
+    NSInteger n = [self crashCount] + 1;
+    [self kg_writeCrashCount:n];
+    KGLog(@"崩溃计数 = %ld(达到 5 就熔断)", (long)n);
+}
+
+// ----------------------------------------------------------------------
+// 【v3.0.1 新增 —— 崩溃陷阱】v3.0.0 里noteCrash 是**零调用点的死代码**
+// ----------------------------------------------------------------------
+// 用户装 v3.0.0 后反馈疑似系统异常。查代码发现: 熔断器写了、也被 tick 查了,
+// 但**没有任何地方调noteCrash** —— 也就是说真崩了, 计数永远是 0,
+// 熔断永远不会打开。一个从不触发的保险丝等于没有保险丝。
+//
+// 现在用信号处理器把它接上。信号处理器是唯一能在「进程即将死掉」时
+// 立刻把计数写盘的时机 —— ObjC 异常走这里, segfault / abort 也走这里。
+//
+// 【为什么写文件而不是 NSUserDefaults】崩溃现场堆栈可能已经不可用,
+// 调NSUserDefaults 有再崩的风险。这里只做最原始的事:
+// read 一个整数 → +1 → 覆写。文件小、无锁、不分配对象。
+// ----------------------------------------------------------------------
+
+- (void)kg_installCrashTrap {
+    static BOOL installed = NO;
+    if (installed) return;
+    installed = YES;
+    signal(SIGSEGV, KGSignalHandler);
+    signal(SIGABRT, KGSignalHandler);
+    signal(SIGBUS,  KGSignalHandler);
+    signal(SIGILL,  KGSignalHandler);
+    // 栈溢出(SIGSEGV 的子类)单独也要接, 否则爆栈时统计不到。
+    signal(SIGSTKFLT, KGSignalHandler);
+    KGLog(@"崩溃陷阱已安装(3.0.1)");
 }
 
 #pragma mark - 主循环
@@ -308,7 +499,10 @@ static BOOL KGIsBigEnough(UIView *v, UIView *host) {
         return;
     }
 
-    // ---- 找目标层: 系统底板 UIKBBackdropView ----
+    // ---- 找目标层: 玻璃要插的宿主容器 UIKBInputBackdropView(uie=0) ----
+    // v3.0.1 不再找 UIKBBackdropView(那是 uie=1, 不碰)。
+    // 改找它的**父容器** UIKBInputBackdropView —— 探针实测 uie=0,
+    // 里面装的是底板与效果视图, 机制上不参与触摸派发。
     UIView *backdrop = [self findBackdropIn:host];
     if (!backdrop) {
         // 找不到就什么都不做(不能糊玻璃, 十三版的教训)。
@@ -317,24 +511,20 @@ static BOOL KGIsBigEnough(UIView *v, UIView *host) {
         self.tickCount++;
         if (self.tickCount % 25 == 1) {
             KGProbeWrite([NSString stringWithFormat:
-                @"\n[v3.0.0 %@] 未找到 UIKBBackdropView, 本轮不动任何视图。宿主=%@ frame=%@\n",
+                @"\n[v3.0.1 %@] 未找到 UIKBInputBackdropView, 本轮不动任何视图。宿主=%@ frame=%@\n",
                 [NSDate date], KGCls(host), NSStringFromCGRect(f)]);
         }
         return;
     }
 
-    // ---- 换宿主/换底板: 还原旧的, 重新入位 ----
+    // ---- 换宿主/换容器:撤掉旧的, 重新入位 ----
     if (self.backdropView != backdrop || self.glassView.superview == nil) {
-        [self restoreBackdrop];
         [self removeGlass];
         self.backdropView = backdrop;
         self.lastSignature = nil;
     }
 
-    // ---- A. 调低系统底板的白(键盘"实心浅灰"的真凶) ----
-    [self applyBackdropColor:backdrop];
-
-    // ---- B. 玻璃层插到 UIKBInputBackdropView 里, 尺寸严格等于背板 ----
+    // ----玻璃层入位(本版唯一动作) ----
     [self placeGlassInBackdrop:backdrop host:host];
 
     // ---- 样式 ----
@@ -364,9 +554,19 @@ static BOOL KGIsBigEnough(UIView *v, UIView *host) {
     return out;
 }
 
-// BFS 找系统底板 UIKBBackdropView。
-// 判据: 类名匹配 + 面积 >= 宿主 10% + 在屏。
-// 明确排除按键层: 按键层类名是 UIKBKeyplaneView / UIKBKeyView, 匹配不上。
+// BFS 找玻璃的入位容器 `UIKBInputBackdropView`。
+//
+// 【v3.0.1 改动】原来找的是 `UIKBBackdropView`(uie=1, 底板本体),
+// 现在找它的**父容器** —— 探针实测 `UIKBInputBackdropView 430x311 uie=0`,
+// 是纯视觉容器, 机制上不参与触摸派发。
+//
+// 为什么必须换: 插 subview 到一个 uie=1 的视图里, 等于往系统自己参与
+// 命中检测的视图里塞东西。v3.0.0 就是这么干的(虽然它自己插的是 uie=0 的
+// 玻璃层, 但**父层是 uie=1 这件事本身就超出了 v1.0.0 铁律允许的范围**)。
+// 换到 uie=0 的容器里, 整条路径上每一层都不参与命中, 铁律才是完整守住的。
+//
+// 判据: 类名匹配 + uie=0 + 面积 >= 宿主 10% + 在屏 + 确实有子层
+// (排除空壳)。按键层类名是 UIKBKeyplaneView / UIKBKeyView, 匹配不上。
 - (UIView *)findBackdropIn:(UIView *)host {
     if (!host) return nil;
     UIView *best = nil;
@@ -377,7 +577,11 @@ static BOOL KGIsBigEnough(UIView *v, UIView *host) {
         UIView *cur = q.firstObject;
         [q removeObjectAtIndex:0];
         for (UIView *sub in cur.subviews) {
-            if (KGTouchSafeForColorOnly(sub) && KGIsBigEnough(sub, host) && KGIsOnScreen(sub)) {
+            if (KGClassIs(sub, @"UIKBInputBackdropView")
+                && sub.userInteractionEnabled == NO
+                && sub.subviews.count > 0
+                && KGIsBigEnough(sub, host)
+                && KGIsOnScreen(sub)) {
                 CGFloat a = sub.frame.size.width * sub.frame.size.height;
                 if (a > bestArea) { bestArea = a; best = sub; }
             }
@@ -387,14 +591,24 @@ static BOOL KGIsBigEnough(UIView *v, UIView *host) {
     return best;
 }
 
-#pragma mark - A. 系统底板调色
+#pragma mark - 系统底板调色(已停用)
 
+// 【v3.0.1 已整体停用 —— 不再碰系统底板的任何属性】
+//
+// 这个函数在 v3.0.0 里会去写 `UIKBBackdropView.backgroundColor`。
+// 那是个 `uie=1` 的系统视图, 写在输入视图的主布局链路上。
+// 用户装 v3.0.0 后反馈疑似系统异常(自己描述为「注销」), 已卸载。
+//
+// **不确定是不是它造成的** —— 但「不确定」本身就足够成为撤回的理由:
+// v1.0.0 立的铁律是「只碰 uie=0 的层」, 十三版有两次安全模式都源于
+// 「改系统视图」。我没有任何证据证明写它的 backgroundColor 是安全的,
+// 却已经交付了。**没有证据就破铁律, 这正是十三版栽了十三次的地方。**
+//
+// 函数体保留而不是删掉, 是为了让这段判断连同它的理由一起留在代码里——
+// 将来若有人想「再加回来」, 会先读到这里。整段被 #if 0 关掉, 编译不进二进制。
+#if 0
 - (void)applyBackdropColor:(UIView *)backdrop {
     if (!backdrop) return;
-    // 【原色只抓一次】这是还原能否正确的前提。
-    // 早先的写法是「每拍都把当前色存成原色」, 结果第二次 tick 存进去的
-    // 已经是「我们」自己改过的值 —— 还原时等于还原成目标值, 插件一关白色就
-    // 永久留下。这正是十三版里「卸载插件后键盘还是花的」的来源。
     if (!self.savedBackdropColor) {
         self.savedBackdropColor = [backdrop.backgroundColor copy];
     }
@@ -404,7 +618,6 @@ static BOOL KGIsBigEnough(UIView *v, UIView *host) {
     if (c && [c respondsToSelector:@selector(getRed:green:blue:alpha:)]) {
         [c getRed:&r green:&g blue:&b alpha:&a];
     }
-    // 只改 alpha, 保持原来的色相(系统那块是白1,1,1)。
     UIColor *nc = [UIColor colorWithRed:r green:g blue:b alpha:target];
     CGFloat curA = -1.0;
     UIColor *cur = backdrop.backgroundColor;
@@ -412,33 +625,33 @@ static BOOL KGIsBigEnough(UIView *v, UIView *host) {
         [cur getRed:&r green:&g blue:&b alpha:&curA];
     }
     if (fabs(curA - target) > 0.004) {
-        backdrop.backgroundColor = nc;
+        backdrop.backgroundColor = nc;   // ← 这行是 v3.0.1 撤回的对象
     }
 }
+#endif
 
-#pragma mark - B. 玻璃层入位
+#pragma mark - 玻璃层入位(本版唯一动作)
 
-- (void)placeGlassInBackdrop:(UIView *)backdrop host:(UIView *)host {
-    if (!backdrop) return;
-    // 玻璃要插在 backdrop 的**父层**(UIKBInputBackdropView), 与 backdrop 平级,
-    // 这样玻璃盖住系统底板、但在按键层之下。
-    UIView *parent = backdrop.superview;
+- (void)placeGlassInBackdrop:(UIView *)container host:(UIView *)host {
+    UIView *parent = container;    // v3.0.1: 直接就是 uie=0 的容器本身
     if (!parent) {
         [self removeGlass];
         return;
     }
     if (!self.glassView) {
-        self.glassView = [[KGGlassView alloc] initWithFrame:backdrop.bounds];
+        self.glassView = [[KGGlassView alloc] initWithFrame:container.bounds];
         self.glassView.userInteractionEnabled = NO;   // 触摸安全第一道闸
     }
-    // 尺寸**严格等于底板**, 不多不少。这是 v3.0.0 与十三版最大的区别。
-    if (!CGRectEqualToRect(self.glassView.frame, backdrop.frame)) {
-        self.glassView.frame = backdrop.frame;
+    // 尺寸**严格等于容器**, 不多不少。这是 v3.0.0 起与十三版最大的区别。
+    if (!CGRectEqualToRect(self.glassView.frame, container.frame)) {
+        self.glassView.frame = container.frame;
     }
     if (self.glassView.superview != parent) {
-        // 用 insertSubview:aboveSubview: 把玻璃插在系统底板正上方。
-        // 若底板已是父层最后一个子视图, aboveSubview 也能正常工作。
-        [parent insertSubview:self.glassView aboveSubview:backdrop];
+        // 插到容器**最顶上**(bringSubviewToFront)而不是 aboveSubview:
+        // 容器是 uie=0, 塞进去不影响触摸; 而玻璃必须在系统底板**之上**
+        // 才能起到「压住那层白」的作用 —— 效果由玻璃自己的 veil 提供,
+        // 不再需要去改底板的颜色。
+        [parent bringSubviewToFront:self.glassView];
         KGLog(@"玻璃入位: parent=%@ frame=%@",
               KGCls(parent), NSStringFromCGRect(self.glassView.frame));
     }
@@ -457,23 +670,19 @@ static BOOL KGIsBigEnough(UIView *v, UIView *host) {
     [self.glassView applyStyle:st dark:NO];
 }
 
-#pragma mark - 还原/ 拆除
+#pragma mark - 拆除
 
-- (void)restoreBackdrop {
-    if (self.backdropView && self.savedBackdropColor) {
-        self.backdropView.backgroundColor = self.savedBackdropColor;
-    }
-    self.backdropView = nil;
-    self.savedBackdropColor = nil;
-}
-
+// 【v3.0.1】restoreBackdrop 整个删掉了。
+// 它唯一的用途是把 UIKBBackdropView 的 backgroundColor 写回原值——
+// 而 v3.0.1 已经不再改那个属性, 所以**没有需要还原的东西**。
+// 「我们只碰自己创建的玻璃层」这条现在是真的, 不再需要 restore 兜底。
 - (void)removeGlass {
     if (self.glassView.superview) [self.glassView removeFromSuperview];
     self.appliedStyle = NO;
+    self.backdropView = nil;
 }
 
 - (void)teardownAll {
-    [self restoreBackdrop];
     [self removeGlass];
     self.hasLastFrame = NO;
     self.sameCount = 0;
@@ -481,15 +690,14 @@ static BOOL KGIsBigEnough(UIView *v, UIView *host) {
 
 #pragma mark - 探针
 
-- (void)writeProbe:(UIView *)host backdrop:(UIView *)backdrop {
+- (void)writeProbe:(UIView *)host backdrop:(UIView *)container {
     NSString *s =
     [NSString stringWithFormat:
-        @"\n[v3.0.0 %@] 宿主=%@ {%@} 底板=%@ {%@} bg=%@ 白度=%.2f 玻璃=%@ 父=%@\n",
+        @"\n[v3.0.1 %@] 宿主=%@ {%@} 容器=%@ {%@} uie=%d 玻璃=%@ 父=%@\n",
         [NSDate date],
         KGCls(host), NSStringFromCGRect(host.frame),
-        KGCls(backdrop), NSStringFromCGRect(backdrop.frame),
-        [self colorDesc:backdrop.backgroundColor],
-        [KGPrefs backdropWhiteness],
+        KGCls(container), NSStringFromCGRect(container.frame),
+        container ? (int)container.userInteractionEnabled : -1,
         self.glassView ? (self.glassView.superview ? @"已入位" : @"游离") : @"无",
         self.glassView ? KGCls(self.glassView.superview) : @"-"];
     KGProbeWrite(s);
