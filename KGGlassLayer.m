@@ -5,19 +5,27 @@
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
 
 // 给任意 CALayer 挂高斯模糊。CAFilter 是私有类, 取不到就静默跳过 (降级为纯染色+高光)。
+//
+// v0.4.2: 整段包在 @try 里。KVC 写私有属性抛异常时, 如果正好发生在
+// CoreAnimation 的布局/渲染回调里, 是**直接 abort 进程**, 不是让 App 崩一下 ——
+// 键盘一起来就崩, 反复重启直接进安全模式。这里必须自己兜住。
 static void KGApplyBlur(CALayer *layer, CGFloat radius) {
-    Class CAFilterClass = NSClassFromString(@"CAFilter");
-    if (!CAFilterClass) return;
-    SEL sel = NSSelectorFromString(@"filterWithName:");
-    if (![CAFilterClass respondsToSelector:sel]) return;
-    id filter = [CAFilterClass performSelector:sel withObject:@"gaussianBlur"];
-    if (!filter) return;
-    [filter setValue:@(radius) forKey:@"inputRadius"];
-    layer.filters = @[filter];
+    @try {
+        Class CAFilterClass = NSClassFromString(@"CAFilter");
+        if (!CAFilterClass) return;
+        SEL sel = NSSelectorFromString(@"filterWithName:");
+        if (![CAFilterClass respondsToSelector:sel]) return;
+        id filter = [CAFilterClass performSelector:sel withObject:@"gaussianBlur"];
+        if (!filter) return;
+        [filter setValue:@(radius) forKey:@"inputRadius"];
+        layer.filters = @[filter];
 
-    // CABackdropLayer 有个 enabled 开关, 某些系统版本默认关着
-    if ([layer respondsToSelector:NSSelectorFromString(@"setEnabled:")]) {
-        [layer setValue:@YES forKey:@"enabled"];
+        // CABackdropLayer 有个 enabled 开关, 某些系统版本默认关着
+        if ([layer respondsToSelector:NSSelectorFromString(@"setEnabled:")]) {
+            [layer setValue:@YES forKey:@"enabled"];
+        }
+    } @catch (NSException *exception) {
+        NSLog(@"[KeyboardGlass] KGApplyBlur 异常, 已跳过模糊: %@", exception);
     }
 }
 
@@ -53,6 +61,12 @@ static UIBezierPath *KGMakeTopRingPath(CGRect bounds, CGFloat radius, CGFloat ri
 @property (nonatomic, assign) BOOL backdropAvailable;
 @end
 
+// 真正的布局逻辑。单独拆出来, 由 layoutSublayers 包着 @try 调用 ——
+// 这样整个方法体都在异常保护之下, 不会漏掉某一行。
+@interface KGGlassLayer ()
+- (void)kg_layoutSublayersSafe;
+@end
+
 @implementation KGGlassLayer
 
 - (instancetype)init {
@@ -68,22 +82,36 @@ static UIBezierPath *KGMakeTopRingPath(CGRect bounds, CGFloat radius, CGFloat ri
 }
 
 - (void)setupSublayers {
-    // 本体: 真正做模糊的采样层
-    Class backdropClass = NSClassFromString(@"CABackdropLayer");
-    CALayer *backdrop = backdropClass ? (CALayer *)[[backdropClass alloc] init] : [CALayer layer];
-    backdrop.masksToBounds = YES;
-    self.backdropLayer = backdrop;
-    [self addSublayer:backdrop];
+    // CABackdropLayer 是私有类。alloc/init 也可能失败或抛异常, 全部兜住,
+    // 任何一步失败都退回普通 CALayer —— 观感差一点, 但绝不崩。
+    @try {
+        // 本体: 真正做模糊的采样层
+        Class backdropClass = NSClassFromString(@"CABackdropLayer");
+        CALayer *backdrop = backdropClass ? (CALayer *)[[backdropClass alloc] init] : [CALayer layer];
+        backdrop.masksToBounds = YES;
+        self.backdropLayer = backdrop;
+        [self addSublayer:backdrop];
 
-    self.veilLayer = [CALayer layer];
-    self.veilLayer.masksToBounds = YES;
-    [self addSublayer:self.veilLayer];
+        self.veilLayer = [CALayer layer];
+        self.veilLayer.masksToBounds = YES;
+        [self addSublayer:self.veilLayer];
 
-    Class bc = NSClassFromString(@"CABackdropLayer");
-    CALayer *refract = bc ? (CALayer *)[[bc alloc] init] : [CALayer layer];
-    refract.masksToBounds = YES;
-    self.refractLayer = refract;
-    [self addSublayer:refract];
+        CALayer *refract = backdropClass ? (CALayer *)[[backdropClass alloc] init] : [CALayer layer];
+        refract.masksToBounds = YES;
+        self.refractLayer = refract;
+        [self addSublayer:refract];
+    } @catch (NSException *exception) {
+        NSLog(@"[KeyboardGlass] setupSublayers 异常, 退回普通 CALayer: %@", exception);
+        [self.sublayers enumerateObjectsUsingBlock:^(CALayer *layer, NSUInteger idx, BOOL *stop) {
+            [layer removeFromSuperlayer];
+        }];
+        self.backdropLayer = [CALayer layer];
+        self.veilLayer = [CALayer layer];
+        self.refractLayer = [CALayer layer];
+        [self addSublayer:self.backdropLayer];
+        [self addSublayer:self.veilLayer];
+        [self addSublayer:self.refractLayer];
+    }
 
     self.rimLayer = [CAGradientLayer layer];
     self.rimLayer.type = kCAGradientLayerAxial;
@@ -103,9 +131,21 @@ static UIBezierPath *KGMakeTopRingPath(CGRect bounds, CGFloat radius, CGFloat ri
     [self setNeedsLayout];
 }
 
+// v0.4.2: 整个 layoutSublayers 包 @try。
+// 这是本项目**最危险的位置**: 它由 CoreAnimation 在布局/渲染回调里调用,
+// 期间抛出的异常不是"App 崩一下", 而是直接 abort 进程。v0.4.1 就是因为
+// 同类的越界异常在这个调用链上, 导致键盘一起来就崩、反复重启进安全模式。
+// 玻璃只是观感功能, 任何情况下都不值得拿系统稳定性去换。
 - (void)layoutSublayers {
     [super layoutSublayers];
+    @try {
+        [self kg_layoutSublayersSafe];
+    } @catch (NSException *exception) {
+        NSLog(@"[KeyboardGlass] layoutSublayers 异常, 本帧不更新玻璃: %@", exception);
+    }
+}
 
+- (void)kg_layoutSublayersSafe {
     CGRect bounds = self.bounds;
     if (CGRectIsEmpty(bounds)) return;
 

@@ -18,7 +18,7 @@ static void KGProbe(NSString *msg) {
 // 参数版本号。1 = 早期那组「在键盘上几乎全透明」的默认值, 2 = 液态玻璃推荐值,
 // 3 = 工作模式默认切到「完整」(这一步是错的), 4 = 默认退回「纯探针」。
 // 必须和 KGPrefs.m 里的 kKGParamsVersion 保持一致。
-static const NSInteger kKGParamsVersion = 4;
+static const NSInteger kKGParamsVersion = 5;
 static const NSInteger kKGWorkModeProbe = 0;   // 必须与 KGPrefs.m 的 KGWorkModeProbe 一致
 static const double kKGRecommendedBlur       = 12.0;
 static const double kKGRecommendedRefraction = 10.0;
@@ -30,6 +30,13 @@ static const double kKGRecommendedVeil       = 0.42;
 // 一定读得到。判据是版本号而不是参数内容: 用户后来自己拖到 0 是有意的,
 // 不能再被覆盖回去。
 static void KGMigrateParamsIfNeeded(NSUserDefaults *defaults) {
+    // 崩溃熔断状态必须无条件清掉。v0.4.1 崩过一次之后计数已经满了,
+    // 用户装回新版本时若不清, 插件会一直处于「已熔断」状态啥也不干 ——
+    // 看起来就像装了没用。不清它, 用户永远不会知道插件其实是关着的。
+    [defaults removeObjectForKey:@"CircuitOpen"];
+    [defaults removeObjectForKey:@"CrashCount"];
+    [defaults removeObjectForKey:@"CrashLastTime"];
+
     if ([defaults integerForKey:@"ParamsVersion"] >= kKGParamsVersion) return;
 
     NSInteger old = [defaults integerForKey:@"ParamsVersion"];
@@ -44,7 +51,7 @@ static void KGMigrateParamsIfNeeded(NSUserDefaults *defaults) {
     [defaults setObject:@(kKGWorkModeProbe)         forKey:@"WorkMode"];
     [defaults setObject:@YES                        forKey:@"HideNativeBackdrop"];
     [defaults synchronize];
-    KGProbe([NSString stringWithFormat:@"[migrate] 参数版本 %ld -> %ld, 已写入推荐值 + 工作模式=纯探针",
+    KGProbe([NSString stringWithFormat:@"[migrate] 参数版本 %ld -> %ld, 已写入推荐值 + 工作模式=纯探针 + 熔断计数已清零",
              (long)old, (long)kKGParamsVersion]);
 }
 

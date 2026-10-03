@@ -18,4 +18,18 @@
 // 宿主视图的 frame 就是键盘矩形, 不依赖任何私有背板类名。
 - (void)handleHostView:(UIView *)host;
 
+// v0.4.2: 崩溃熔断器。
+//
+// 背景: v0.4.1 的默认档 (Probe) 每次布局必崩 —— 探针代码拿 NSNotFound 当下标用,
+// `if (gi > 0)` 挡不住 (NSNotFound 是 NSUIntegerMax, 转 NSInteger 后 > 0),
+// 数组越界抛 NSRangeException, 而它发生在键盘 layoutSubviews 调用链里,
+// 键盘一起来就崩 → 反复重启 → **安全模式**。
+//
+// Objective-C 的 @try 只能抓 NSException, 抓不到野指针 / 栈溢出 / EXC_BAD_ACCESS。
+// 所以再加一层: 连续崩溃计数超阈值就把插件整个关掉, 宁可没玻璃也不能再进安全模式。
+// 崩溃计数跨进程持久化 (NSUserDefaults), 因为崩溃时内存里的东西全丢。
++ (void)noteHandledException:(NSException *)exception where:(NSString *)where;
++ (BOOL)isCircuitOpen;
++ (void)resetCircuit;
+
 @end

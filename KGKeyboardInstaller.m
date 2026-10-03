@@ -3,6 +3,58 @@
 #import "KGPrefs.h"
 #import <sys/stat.h>
 
+// 探针写盘。定义在文件后面的「探针」小节里, 但熔断器要先用它,
+// 所以这里前置声明 —— 顺序反了会编译报 implicit function declaration。
+static void KGWriteProbe(NSString *content);
+
+#pragma mark - 崩溃熔断器
+
+// 阈值取 5: 单次偶发异常(比如键盘正在重建时拿到半截视图)不该永久禁用插件,
+// 但连续 5 次说明是稳定的代码缺陷, 必须停手。
+static const NSInteger kKGCrashThreshold = 5;
+// 统计窗口 10 分钟。超过这个时间没再崩 -> 视为偶发, 计数清零重新开始。
+static const NSTimeInterval kKGCrashWindow = 600.0;
+static NSString * const kKGCrashCountKey = @"CrashCount";
+static NSString * const kKGCrashLastKey  = @"CrashLastTime";
+static NSString * const kKGCircuitOpenKey = @"CircuitOpen";
+
++ (void)noteHandledException:(NSException *)exception where:(NSString *)where {
+    @try {
+        NSUserDefaults *d = [KGPrefs defaults];
+        NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+        NSTimeInterval last = [d doubleForKey:kKGCrashLastKey];
+        NSInteger count = [d integerForKey:kKGCrashCountKey];
+
+        // 超出统计窗口 -> 认为是偶发, 从头计数
+        if (last <= 0 || (now - last) > kKGCrashWindow) count = 0;
+        count += 1;
+        [d setInteger:count forKey:kKGCrashCountKey];
+        [d setDouble:now forKey:kKGCrashLastKey];
+
+        if (count >= kKGCrashThreshold) {
+            [d setBool:YES forKey:kKGCircuitOpenKey];
+        }
+        [d synchronize];
+
+        KGWriteProbe([NSString stringWithFormat:
+            @"[熔断] %@ 第 %ld 次异常: %@\n", where, (long)count, exception.reason]);
+    } @catch (NSException *ignored) {
+        // 熔断器自己绝不能成为崩溃源
+    }
+}
+
++ (BOOL)isCircuitOpen {
+    return [[KGPrefs defaults] boolForKey:kKGCircuitOpenKey];
+}
+
++ (void)resetCircuit {
+    NSUserDefaults *d = [KGPrefs defaults];
+    [d setInteger:0 forKey:kKGCrashCountKey];
+    [d setDouble:0 forKey:kKGCrashLastKey];
+    [d setBool:NO forKey:kKGCircuitOpenKey];
+    [d synchronize];
+}
+
 #pragma mark - 视图判定
 
 // 键盘宿主视图 —— UIInputSetHostView。它的 frame 就是键盘矩形本身。
@@ -194,6 +246,8 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 #pragma mark -
 
 @interface KGKeyboardInstaller ()
+// 真正的主流程。由 refreshWithHost: 包着 @try 调用。
+- (void)kg_refreshWithHost:(UIView *)host;
 @property (nonatomic, strong) KGGlassLayer *glassLayer;
 @property (nonatomic, weak)   UIView *hostView;          // 锁定的宿主
 // 键 = 被隐藏的原生背景层 (弱引用, 键盘重建时自动失效)
@@ -224,6 +278,9 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 #pragma mark - 对外入口
 
 - (void)handleHostView:(UIView *)host {
+    // 熔断检查放最前面。已熔断时**一个节点都不碰**, 连探针都不写 ——
+    // 既然判定这代码路径会崩, 就不该再让它有机会碰键盘的视图树。
+    if ([KGKeyboardInstaller isCircuitOpen]) return;
     if (!KGClassIsInputSetHost(host)) return;
     // 锁定宿主: 其它宿主一律不理, 否则玻璃层会被来回搬, 触发布局死循环
     if (self.hostView && self.hostView != host && KGIsUsableHost(self.hostView)) return;
@@ -233,6 +290,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 // root 传 UIInputWindowController.view (UIInputSetContainerView)
 - (void)handleLayout:(UIView *)root {
     if (!root) return;
+    if ([KGKeyboardInstaller isCircuitOpen]) return;
 
     [KGPrefs debugLog];
 
@@ -254,6 +312,15 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 #pragma mark - 主流程
 
 - (void)refreshWithHost:(UIView *)host {
+    if ([KGKeyboardInstaller isCircuitOpen]) return;
+    @try {
+        [self kg_refreshWithHost:host];
+    } @catch (NSException *exception) {
+        [KGKeyboardInstaller noteHandledException:exception where:@"refreshWithHost"];
+    }
+}
+
+- (void)kg_refreshWithHost:(UIView *)host {
     [KGPrefs debugLog];
 
     KGWorkMode mode = [KGPrefs workMode];
@@ -559,9 +626,18 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 
     // 玻璃层正下方那三层是谁 —— 玻璃是 backdrop 层, 采样源就在它下面。
     // 如果这三层里有东西仍然不透明, 玻璃就采不到键盘外面的画面。
+    //
+    // KG_PROBE_CRASH (v0.4.2 安全模式实锤, 优先级最高):
+    //   这里的 `if (gi > 0)` 挡不住 NSNotFound —— NSNotFound 是 NSUIntegerMax,
+    //   强转成 NSInteger 后是 18446744073709551615, 它**大于 0**, 条件照样成立。
+    //   于是循环从 i = NSNotFound-1 开始, 拿它去下标 subs 立刻 NSRangeException。
+    //   而 gi 恰好在「玻璃层不存在」时等于 NSNotFound —— 也就是 Probe 档
+    //   (v0.4.1 的默认档!) 每次布局都必崩。崩溃发生在 layoutSubviews 里,
+    //   键盘一起就崩 → 反复重启 → 安全模式。
+    //   教训: **拿 NSNotFound 当下标用, 不能靠 `> 0` 判**, 必须显式比 NSNotFound。
     NSMutableString *underDesc = [NSMutableString string];
     NSArray<CALayer *> *subs = host.layer.sublayers;
-    if (gi > 0) {
+    if (gi != NSNotFound && gi > 0 && gi <= (NSInteger)subs.count) {
         for (NSInteger i = gi - 1; i >= 0 && i >= gi - 3; i--) {
             CALayer *l = subs[(NSUInteger)i];
             [underDesc appendFormat:@"[%ld]%@ hidden=%d opacity=%.2f ",

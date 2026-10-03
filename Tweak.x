@@ -30,7 +30,10 @@
     @try {
         [[KGKeyboardInstaller shared] handleHostView:self];
     } @catch (NSException *exception) {
+        // v0.4.2: 异常要走熔断计数, 不能只打日志。连续崩到阈值就整个停手,
+        // 宁可没玻璃也不能再把用户送进安全模式。
         KGLog(@"宿主布局处理异常: %@", exception);
+        [KGKeyboardInstaller noteHandledException:exception where:@"layoutSubviews"];
     }
     kgInLayout = NO;
 }
@@ -47,6 +50,7 @@
         [[KGKeyboardInstaller shared] handleLayout:self.view];
     } @catch (NSException *exception) {
         KGLog(@"布局处理异常: %@", exception);
+        [KGKeyboardInstaller noteHandledException:exception where:@"viewDidLayoutSubviews"];
     }
 }
 
@@ -61,6 +65,6 @@
 %ctor {
     @autoreleasepool {
         [KGPrefs registerDefaults];
-        KGLog(@"KeyboardGlass 已加载 (0.4.1)");
+        KGLog(@"KeyboardGlass 已加载 (0.4.2)");
     }
 }
