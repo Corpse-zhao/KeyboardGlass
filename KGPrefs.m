@@ -54,6 +54,10 @@ void KGLog(NSString *format, ...) {
         @"HideNativeBackdrop": @YES,
         @"DebugLog":           @NO,
         @"ShowLayerOutline":   @NO,
+        // 默认「纯探针」: 一个节点都不碰, 只写探针。
+        // 用户反馈「键盘打不了字」但始终定位不到是改视图树还是 hook 本身,
+        // 所以默认从最干净的基准开始, 由用户逐档往上试。
+        @"WorkMode":           @(KGWorkModeProbe),
     }];
     kKGDebugEnabled = [[self defaults] boolForKey:@"DebugLog"];
     [self runParamsMigrationIfNeeded];
@@ -164,6 +168,14 @@ void KGLog(NSString *format, ...) {
     NSUserDefaults *d = [self defaults];
     if ([d objectForKey:@"HideNativeBackdrop"] == nil) return NO;
     return [d boolForKey:@"HideNativeBackdrop"];
+}
+
++ (KGWorkMode)workMode {
+    NSUserDefaults *d = [self defaults];
+    if ([d objectForKey:@"WorkMode"] == nil) return KGWorkModeProbe;
+    NSInteger raw = [d integerForKey:@"WorkMode"];
+    if (raw < KGWorkModeProbe || raw > KGWorkModeFull) return KGWorkModeProbe;
+    return (KGWorkMode)raw;
 }
 
 + (BOOL)showLayerOutline {

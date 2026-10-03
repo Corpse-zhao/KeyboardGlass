@@ -18,6 +18,7 @@ static void KGProbe(NSString *msg) {
 // 参数版本号。1 = 早期那组「在键盘上几乎全透明」的默认值, 2 = 现在这组。
 // 必须和 KGPrefs.m 里的 kKGParamsVersion 保持一致。
 static const NSInteger kKGParamsVersion = 2;
+static const NSInteger kKGWorkModeProbe = 0;   // 必须与 KGPrefs.m 的 KGWorkModeProbe 一致
 static const double kKGRecommendedBlur       = 12.0;
 static const double kKGRecommendedRefraction = 10.0;
 static const double kKGRecommendedHighlight  = 0.65;
@@ -110,8 +111,10 @@ static void KGMigrateParamsIfNeeded(NSUserDefaults *defaults) {
     [defaults setObject:@(kKGRecommendedVeil)       forKey:@"LiquidVeil"];
     [defaults setObject:@0                          forKey:@"CornerRadius"];
     [defaults setObject:@YES                        forKey:@"HideNativeBackdrop"];
+    // 工作模式也一并回到最安全的「纯探针」—— 排查期间不该带着完整效果
+    [defaults setObject:@(kKGWorkModeProbe)         forKey:@"WorkMode"];
     [defaults synchronize];
-    KGProbe(@"[reset] 已恢复推荐参数");
+    KGProbe(@"[reset] 已恢复推荐参数 (工作模式=纯探针)");
     _specifiers = nil;
     [self reloadSpecifiers];
 }

@@ -14,17 +14,15 @@
 @interface UIInputSetHostView : UIView
 @end
 
-// UIInputViewController 是 iOS 8+ 的公开类, 不需要再声明。
-
 // 入口 1 (主): 键盘宿主视图自己的 layoutSubviews。
 // 它的 frame 就是键盘矩形, 且一定存在 —— 不用猜任何私有背板类名,
-// 时机也最准 (键盘弹出 / 收起 / 改尺寸 / 切键盘都会走到)。
+// 时机也最准 (键盘弹出 / 收起 / 改尺寸 / 换键盘都会走到)。
 %hook UIInputSetHostView
 
 - (void)layoutSubviews {
     %orig;
 
-    // 我们在里面会往宿主上加子视图, 可能又触发一次布局 —— 加个重入闸,
+    // 我们在里面会往宿主上加东西, 可能又触发一次布局 —— 加个重入闸,
     // 避免无限递归。
     static BOOL kgInLayout = NO;
     if (kgInLayout) return;
@@ -40,7 +38,7 @@
 %end
 
 // 入口 2 (兜底): 系统键盘的容器控制器。
-// 万一某些 iOS 版本/场景没有 UIInputSetHostView, 从这一层全树找也一样能装。
+// 万一某些 iOS 版本/场景没有 UIInputSetHostView, 从这一层找也一样能装。
 %hook UIInputWindowController
 
 - (void)viewDidLayoutSubviews {
@@ -54,25 +52,15 @@
 
 %end
 
-// 入口 3: 第三方输入法 (微信输入法等) —— 键盘在它们自己的 Keyboard Extension
-// 进程里, 由 UIInputViewController 子类管理。视图全是自绘, 结构未知,
-// 先把视图树 dump 进探针文件, 拿到结构后再对准 hook。
-%hook UIInputViewController
-
-- (void)viewDidLayoutSubviews {
-    %orig;
-    @try {
-        [[KGKeyboardInstaller shared] handleExtensionLayout:self.view];
-    } @catch (NSException *exception) {
-        KGLog(@"扩展布局处理异常: %@", exception);
-    }
-}
-
-%end
+// v0.3.0 起**不再 hook UIInputViewController**。
+// 那是第三方输入法 (微信输入法等) 的入口 —— 它们的键盘跑在独立的
+// Keyboard Extension 进程、视图全部自绘, 我们对系统键盘那套锚点假设在那里
+// 完全不成立。用户实测在微信输入法上同样「打不了字」, 所以这条路径整个删掉。
+// 后续真要做第三方输入法, 必须单独立开关、且默认关闭。
 
 %ctor {
     @autoreleasepool {
         [KGPrefs registerDefaults];
-        KGLog(@"KeyboardGlass 已加载 (0.2.3)");
+        KGLog(@"KeyboardGlass 已加载 (0.3.0)");
     }
 }

@@ -13,7 +13,7 @@
 			<key>label</key>
 			<string>键盘液态玻璃</string>
 			<key>footerText</key>
-			<string>给系统键盘的背板换上 iOS 26 风格的玻璃材质。改完切一次键盘（或收起再弹出）即可看到效果。</string>
+			<string>给系统键盘换上 iOS 26 风格的玻璃材质。改完切一次键盘（或收起再弹出）即可看到效果。仅对系统键盘生效，第三方输入法（微信输入法等）不会被改动。</string>
 		</dict>
 
 		<dict>
@@ -31,6 +31,44 @@
 			<string>readPreferenceValue:</string>
 			<key>set</key>
 			<string>setPreferenceValue:specifier:</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSLinkListCell</string>
+			<key>label</key>
+			<string>工作模式</string>
+			<key>key</key>
+			<string>WorkMode</string>
+			<key>default</key>
+			<integer>0</integer>
+			<key>defaults</key>
+			<string>com.banli.keyboardglass.preferences</string>
+			<key>detail</key>
+			<string>PSListItemsController</string>
+			<key>validTitles</key>
+			<array>
+				<string>① 纯探针（什么都不改）</string>
+				<string>② 只隐藏原生背景</string>
+				<string>③ 完整·插入玻璃层</string>
+			</array>
+			<key>validValues</key>
+			<array>
+				<integer>0</integer>
+				<integer>1</integer>
+				<integer>2</integer>
+			</array>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>排查用。默认「① 纯探针」：插件只记录信息，一个界面元素都不碰。请依次往上试，先确认哪一档开始打不了字——①都打不了字就说明问题不在玻璃层，而在插件注入本身。改完切一次键盘即可生效。</string>
 		</dict>
 
 		<dict>
@@ -318,7 +356,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>板栗仁 · KeyboardGlass 0.2.3</string>
+			<string>板栗仁 · KeyboardGlass 0.3.0</string>
 		</dict>
 
 	</array>

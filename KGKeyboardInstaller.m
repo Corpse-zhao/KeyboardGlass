@@ -166,7 +166,6 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 @property (nonatomic, assign) KGStyle appliedStyle;
 @property (nonatomic, assign) BOOL hasAppliedStyle;
 @property (nonatomic, assign) BOOL didDumpStableTree;
-@property (nonatomic, assign) BOOL didDumpExtensionTree;
 @property (nonatomic, assign) BOOL didRunTouchDiag;
 @property (nonatomic, copy)   NSString *lastProbeSignature;
 @property (nonatomic, assign) NSUInteger probeCount;
@@ -213,61 +212,65 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     [self legacyRefreshWithRoot:root];
 }
 
-// 第三方输入法扩展
-- (void)handleExtensionLayout:(UIView *)root {
-    if (!root) return;
-    [KGPrefs debugLog];
-
-    UIView *host = [self findInputSetHostIn:root];
-    if (host) {
-        [self refreshWithHost:host];
-        return;
-    }
-
-    if (self.didDumpExtensionTree) return;
-    self.didDumpExtensionTree = YES;
-    NSMutableString *out = [NSMutableString string];
-    [out appendFormat:@"==== [%@] 输入法扩展视图树 ====\n", [NSDate date]];
-    NSInteger budget = 300;
-    KGDumpTreeDetail(root, 0, out, &budget);
-    [out appendString:@"====\n"];
-    KGWriteProbe(out);
-}
-
 #pragma mark - 主流程
 
 - (void)refreshWithHost:(UIView *)host {
     [KGPrefs debugLog];
 
+    KGWorkMode mode = [KGPrefs workMode];
     KGMaterial material = [KGPrefs material];
-    if (material == KGMaterialOff) {
+
+    if (mode != KGWorkModeProbe && material == KGMaterialOff) {
         [self teardown];
         return;
     }
 
     // 键盘收起 / 移出屏幕: 只是藏起来, 千万不能因此换宿主
     if (!KGIsKeyboardSized(host) || !KGIsOnScreen(host)) {
-        self.glassLayer.hidden = YES;
+        if (self.glassLayer.superlayer) self.glassLayer.hidden = YES;
         return;
     }
 
     if (self.hostView != host) {
-        KGLog(@"锁定宿主 %@ frame=%@", NSStringFromClass(host.class), NSStringFromCGRect(host.frame));
+        KGLog(@"锁定宿主 %@ frame=%@ mode=%ld", NSStringFromClass(host.class),
+              NSStringFromCGRect(host.frame), (long)mode);
         self.hostView = host;
         [self.glassLayer removeFromSuperlayer];
         [self restoreNativeBackdrop];
         self.glassLayer.hidden = YES;
 
-        KGDumpHostChildren(host, @"锁定宿主");
+        KGDumpHostChildren(host, mode == KGWorkModeProbe ? @"锁定宿主(纯探针)" : @"锁定宿主");
         [self scheduleStableTreeDump:host];
     }
 
-    [self placeGlassInHost:host];
-    self.glassLayer.hidden = NO;
+    // 从「完整」切到更低档时, 必须把已经插进去的玻璃层撤掉 + 恢复原生背景
+    if (mode != KGWorkModeFull && self.glassLayer.superlayer) {
+        KGLog(@"工作模式降到 %ld, 撤掉已插入的玻璃层", (long)mode);
+        [self.glassLayer removeFromSuperlayer];
+        [self restoreNativeBackdrop];
+    }
 
-    [self enforceNativeBackdropState];
-    [self applyStyleForMaterial:material];
-    [self writeInstallProbeWithHost:host material:material];
+    // 记住原生背景层 (Hide / Full 都要用)
+    if (mode != KGWorkModeProbe && !self.hasNativeBackdrop) {
+        UIView *bg = [self backgroundInHost:host];
+        if (bg) {
+            self.nativeBackdrop = bg;
+            self.nativeBackdropAlpha = bg.alpha;
+            self.hasNativeBackdrop = YES;
+        }
+    }
+
+    if (mode == KGWorkModeFull) {
+        [self placeGlassInHost:host];
+        self.glassLayer.hidden = NO;
+        [self applyStyleForMaterial:material];
+    }
+
+    if (mode != KGWorkModeProbe) {
+        [self enforceNativeBackdropState];
+    }
+
+    [self writeInstallProbeWithHost:host material:material mode:mode];
 }
 
 // 键盘稳定下来之后: 一次触摸诊断 + 一次带外观信息的全树 dump
@@ -403,10 +406,6 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
             if (li != NSNotFound) target = li;
         }
         [hostLayer insertSublayer:self.glassLayer atIndex:(NSUInteger)MAX(0, target)];
-
-        self.nativeBackdrop = [self backgroundInHost:host];
-        self.nativeBackdropAlpha = self.nativeBackdrop ? self.nativeBackdrop.alpha : 1.0;
-        self.hasNativeBackdrop = (self.nativeBackdrop != nil);
         return;
     }
 
@@ -444,25 +443,25 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     [self.glassLayer applyStyle:style dark:dark];
 }
 
-- (void)writeInstallProbeWithHost:(UIView *)host material:(KGMaterial)material {
-    UIView *fg = [self topmostForegroundInHost:host];
+- (void)writeInstallProbeWithHost:(UIView *)host material:(KGMaterial)material mode:(KGWorkMode)mode {
+    UIView *fg = (mode == KGWorkModeFull) ? [self topmostForegroundInHost:host] : nil;
     NSInteger gi = [host.layer.sublayers indexOfObject:self.glassLayer];
     NSInteger fi = fg ? [host.layer.sublayers indexOfObject:fg.layer] : NSNotFound;
     UIView *bg = self.nativeBackdrop;
 
-    NSString *signature = [NSString stringWithFormat:@"%@|%@|%@|%ld|%ld",
+    NSString *signature = [NSString stringWithFormat:@"%@|%@|%@|%ld|%ld|%ld",
         NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
-        bg ? NSStringFromClass(bg.class) : @"none", (long)gi, (long)fi];
+        bg ? NSStringFromClass(bg.class) : @"none", (long)gi, (long)fi, (long)mode];
     if ([signature isEqualToString:self.lastProbeSignature]) return;
     self.lastProbeSignature = signature;
     if (self.probeCount++ > 60) return;
 
     KGWriteProbe([NSString stringWithFormat:
-        @"[install %@] host=%@ hostFrame=%@ onScreen=%d bg=%@ fg=%@(layer %ld) glassLayerIdx=%ld/%lu hideNative=%d material=%ld blur=%.1f refraction=%.1f highlight=%.2f veil=%.2f radius=%.1f outline=%d\n",
-        [NSDate date],
+        @"[install %@] mode=%ld host=%@ hostFrame=%@ onScreen=%d bg=%@ bgAlpha=%.2f fg=%@(layer %ld) glassLayerIdx=%ld/%lu hideNative=%d material=%ld blur=%.1f refraction=%.1f highlight=%.2f veil=%.2f radius=%.1f outline=%d\n",
+        [NSDate date], (long)mode,
         NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
         KGIsOnScreen(host),
-        bg ? NSStringFromClass(bg.class) : @"none",
+        bg ? NSStringFromClass(bg.class) : @"none", self.nativeBackdropAlpha,
         fg ? NSStringFromClass(fg.class) : @"none", (long)fi,
         (long)gi, (unsigned long)host.layer.sublayers.count,
         [KGPrefs hideNativeBackdrop], (long)material,
@@ -530,7 +529,8 @@ static NSArray<NSString *> *KGBackdropClassHints(void) {
 }
 
 - (void)legacyRefreshWithRoot:(UIView *)root {
-    if (self.glassLayer.superlayer != nil) return;   // 已经装好了, 别乱动
+    if ([KGPrefs workMode] != KGWorkModeFull) return;   // 只有「完整」档才动视图
+    if (self.glassLayer.superlayer != nil) return;       // 已经装好了, 别乱动
 
     UIView *found = [self findBackdropByNameIn:root];
     if (!found) return;

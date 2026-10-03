@@ -19,6 +19,18 @@ typedef struct KGStyle {
     BOOL    dark;          // 是否深色模式
 } KGStyle;
 
+// 工作模式 —— 二分隔离用的, 一次安装就能连测三档, 不用反复重装。
+// 用户反馈「键盘打不了字」, 但始终无法确定是「我们改视图树」还是「hook 本身 /
+// 与其它键盘插件冲突」造成的。所以把「我们到底做多少事」做成可调开关:
+//   Probe: 只 hook、只写探针, 一个节点都不碰 —— 最干净的比对基准
+//   Hide : 额外只做一件事: 把原生背景层 alpha 归零
+//   Full : 完整效果 (插玻璃层 + 隐藏背景)
+typedef NS_ENUM(NSInteger, KGWorkMode) {
+    KGWorkModeProbe = 0,   // 纯探针: 完全不碰视图树
+    KGWorkModeHide  = 1,   // 只隐藏原生背景层
+    KGWorkModeFull  = 2,   // 完整: 插入玻璃层
+};
+
 extern NSString * const KGPrefsSuiteName;
 
 @interface KGPrefs : NSObject
@@ -36,6 +48,9 @@ extern NSString * const KGPrefsSuiteName;
 
 + (BOOL)hideNativeBackdrop;
 + (BOOL)debugLog;
+
+// 工作模式 (二分隔离用, 见 KGWorkMode 注释)
++ (KGWorkMode)workMode;
 
 // 调试: 在玻璃层四周画一圈青色边框、内部铺半透明品红。
 // 用来一眼确认「层到底装上了没有、位置尺寸对不对」—— 比调参数猜要快得多。
