@@ -19,6 +19,19 @@ typedef struct KGStyle {
     BOOL    dark;          // 是否深色模式
 } KGStyle;
 
+// KGStyle 是 struct, 不能用 isEqual: 比。
+// 之前这个函数住在已删掉的 KGKeyboardInstaller.h 里, 引擎合并成 KGEngine.m 后
+// 漏了搬过来 —— CI 报 "call to undeclared function 'KGStyleEqual'"。
+// 凡是跨文件比较 KGStyle, 一律用这个, 别自己写 memcmp。
+static inline BOOL KGStyleEqual(KGStyle a, KGStyle b) {
+    return a.blur == b.blur
+        && a.refraction == b.refraction
+        && a.highlight == b.highlight
+        && a.veil == b.veil
+        && a.cornerRadius == b.cornerRadius
+        && a.dark == b.dark;
+}
+
 extern NSString * const KGPrefsSuiteName;
 
 @interface KGPrefs : NSObject

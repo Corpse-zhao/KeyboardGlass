@@ -165,7 +165,10 @@ static BOOL KGIsBigEnough(UIView *v, UIView *host) {
 
 // 当前生效的目标层
 @property (nonatomic, weak)   UIView *backdropView;   // UIKBBackdropView
-@property (nonatomic, strong) UIView *glassView;      // 我们插的玻璃
+// 【类型必须是 KGGlassView *】早先写成 UIView *, 于是 applyStyle: 里调
+// self.glassView.showOutline / applyStyle:dark: 全是"no visible @interface",
+// CI 两个架构同时报错。持有我们自己的类型, 编译器才能帮我们查错。
+@property (nonatomic, strong) KGGlassView *glassView; // 我们插的玻璃
 @property (nonatomic, assign) BOOL appliedStyle;
 @property (nonatomic, assign) KGStyle appliedStyleValue;
 @property (nonatomic, assign) NSString *lastSignature;
