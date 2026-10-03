@@ -7,6 +7,25 @@
 // 所以这里前置声明 —— 顺序反了会编译报 implicit function declaration。
 static void KGWriteProbe(NSString *content);
 
+// 量一个 view 相对根的层级深度 (根自己算 0)。纯粹给探针用。
+//
+// v0.4.3 加这个的原因: 「按键在第几层」这个数字, 是这一整轮 bug 的关键变量。
+// 原来的深度上限 4 恰好卡在按键真实深度 (6-7) 的下面, 导致
+// firstKeyLayerInHost: 恒返回 nil, 而探针只打一个 `fg=none` ——
+// 看日志完全猜不出「是没找到」还是「找到了但层号是 NSNotFound」。
+// 现在把深度打进日志, 以后这类问题看一眼就能定位。
+static NSInteger KGDepthOfView(UIView *view, UIView *root) {
+    if (!view || !root) return -1;
+    NSInteger depth = 0;
+    UIView *cur = view;
+    NSUInteger guard = 0;
+    while (cur && cur != root && guard++ < 50) {
+        cur = cur.superview;
+        depth++;
+    }
+    return (cur == root) ? depth : -1;
+}
+
 #pragma mark - 崩溃熔断器
 
 // 阈值取 5: 单次偶发异常(比如键盘正在重建时拿到半截视图)不该永久禁用插件,
@@ -106,8 +125,20 @@ static BOOL KGIsUsableHost(UIView *view) {
 }
 
 // 往下找「这棵子树里有没有键盘按键内容」。
+//
+// v0.4.2 深度上限从 4 提到 8: 实测按键的**真实**层级是
+//   UIInputSetHostView → _UIKBCompatInputView → UIKeyboardAutomatic
+//     → UIKeyboardImpl → UIKeyboardLayoutStar → UIKBKeyplaneView → UIKBKeyView
+// 也就是 Keyplane 在第 6 层、KeyView 在第 7 层。原来的上限 4 **够不到**,
+// 于是 KGContainsKeyboardContent 恒返回 NO —— 直接后果有两个:
+//   1) firstKeyLayerInHost: 永远找不到按键层 -> 玻璃层 target=0 -> 插到最上面,
+//      正好压在按键上面 -> 用户实测「③ 只插玻璃层就打不了字」。
+//   2) KGIsSafeToHide 的「肚子里有按键内容就��碰」这道保护也全部失效。
+// 这一个深度上限, 同时造成了「挡触摸」和「保护失效」两个看似无关的现象。
+static const NSUInteger kKGMaxContentDepth = 8;
+
 static BOOL KGContainsKeyboardContent(UIView *view, NSUInteger depth) {
-    if (!view || depth > 4) return NO;
+    if (!view || depth > kKGMaxContentDepth) return NO;
     for (UIView *sub in view.subviews) {
         NSString *name = NSStringFromClass(sub.class);
         if ([name containsString:@"Keyplane"]) return YES;
@@ -476,21 +507,33 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     return best;
 }
 
-// 宿主直接孩子里, **最靠下的那个真正含按键内容**的视图。
+// 宿主里**包住整个按键区的那一层**。玻璃层要插在它下面。
 //
-// 为什么不能用「名字带 Keyboard 的」当按键层 (v0.4.0 修正):
-//   UIKeyboardDockView 类名里带 Keyboard, 但它 alpha=0, 是个空壳占位层,
-//   按名字判定会把它当成按键区, 于是玻璃层插到它下面 —— 而真正的主体背景
-//   容器 (UIView{{0,45},...}) 恰好在它上面, 玻璃层又被压回背景之下。
-//   判据换成「子树里确实有 Keyplane / KeyView / KeyboardLayout」, 这是按键
-//   的定义, 不受类名命名干扰。
+// 【v0.4.3 实锤修正】这个方法原来只扫宿主的直接孩子, 于是永远返回 nil。
+// 起因是配套的 KGContainsKeyboardContent 深度上限只有 4 层, 而实测按键在
+// 第 6-7 层 (UIInputSetHostView → _UIKBCompatInputView → UIKeyboardAutomatic
+// → UIKeyboardImpl → UIKeyboardLayoutStar → UIKBKeyplaneView → UIKBKeyView),
+// 4 层够不到 -> 判据恒为 NO -> 这里恒返回 nil。
+// 后果: placeGlassInHost: 里 `if (fg)` 不成立, target 停在 0, 玻璃层被插到
+// **最底层**, 也就是压在所有按键上面。用户实测「③ 只插玻璃层就打不了字」——
+// 这就是那个「玻璃层挡触摸」的真正原因, 不是玻璃层本身的问题。
 //
-// 玻璃层插到这一层之下 = 所有背景之上、所有按键之下。
+// 现在改成 BFS: 找出**同时是按键区祖先、又在宿主里最靠上**的那一层。
+// 对本例就是 _UIKBCompatInputView —— 玻璃插到它下面, 背景之上、按键之下。
 - (UIView *)firstKeyLayerInHost:(UIView *)host {
-    NSArray<UIView *> *subs = host.subviews;
-    for (NSUInteger i = 0; i < subs.count; i++) {
-        UIView *sub = subs[i];
-        if (KGContainsKeyboardContent(sub, 0)) return sub;
+    if (!host) return nil;
+    // BFS: 队列里天然是「层级由浅到深」, 第一个命中就是最靠上的祖先。
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:host];
+    NSUInteger guard = 0;
+    while (queue.count > 0 && guard++ < 2000) {
+        UIView *current = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if (!current) continue;
+        // 宿主本身不算, 我们要找的是它下面的那一层
+        if (current != host && KGContainsKeyboardContent(current, 0)) {
+            return current;
+        }
+        [queue addObjectsFromArray:current.subviews];
     }
     return nil;
 }
@@ -565,13 +608,28 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     BOOL overKeys = [KGPrefs glassOverKeys];
     UIView *fg = [self firstKeyLayerInHost:host];
 
+    // 【v0.4.3】找不到按键层 = 我不知道玻璃该插在哪。
+    // 这种情况**绝不能插** —— 旧代码让 target 停在 0, 结果插到最底层,
+    // 正好压在按键上面, 用户实测「打不了字」。
+    // 找不到就什么都不做: 少一层玻璃无所谓, 键盘不能用是致命的。
+    if (!fg && !overKeys) {
+        if (self.glassLayer) {
+            [self.glassLayer removeFromSuperlayer];
+            self.glassLayer.hidden = YES;
+        }
+        return;
+    }
+
     // 目标下标。overKeys=YES 时插到最上层 (= 按键之上)。
     NSInteger target = 0;
     if (overKeys) {
         target = (NSInteger)hostLayer.sublayers.count;
-    } else if (fg) {
+    } else {
         NSInteger li = [hostLayer.sublayers indexOfObject:fg.layer];
-        if (li != NSNotFound) target = li;
+        // fg 是宿主的后代, 理论上一定在 sublayers 里。但层树和 view 树不同步的
+        // 时刻是存在的, 所以 NSNotFound 必须处理 —— 拿它当下标就是越界崩溃。
+        if (li == NSNotFound) return;
+        target = li;
     }
     // 下标越界会让 insertSublayer:atIndex: 直接抛异常, 必须在范围内夹一下
     if (target < 0) target = 0;
@@ -694,14 +752,14 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     if (self.probeCount++ > 60) return;
 
     KGWriteProbe([NSString stringWithFormat:
-        @"[install %@] mode=%ld host=%@ hostFrame=%@ onScreen=%d glassLayerIdx=%ld/%lu fg=%@(layer %ld) hideNative=%d material=%ld blur=%.1f refraction=%.1f highlight=%.2f veil=%.2f radius=%.1f outline=%d\n"
+        @"[install %@] mode=%ld host=%@ hostFrame=%@ onScreen=%d glassLayerIdx=%ld/%lu fg=%@(layer %ld) fgDepth=%ld hideNative=%d material=%ld blur=%.1f refraction=%.1f highlight=%.2f veil=%.2f radius=%.1f outline=%d\n"
         @"         hiddenBg=%@\n"
         @"         underGlass=%@\n",
         [NSDate date], (long)mode,
         NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
         KGIsOnScreen(host),
         (long)gi, (unsigned long)host.layer.sublayers.count,
-        fg ? NSStringFromClass(fg.class) : @"none", (long)fi,
+        fg ? NSStringFromClass(fg.class) : @"none", (long)fi, (long)KGDepthOfView(fg, host),
         [KGPrefs hideNativeBackdrop], (long)material,
         self.appliedStyle.blur, self.appliedStyle.refraction,
         self.appliedStyle.highlight, self.appliedStyle.veil,
@@ -789,13 +847,22 @@ static NSArray<NSString *> *KGBackdropClassHints(void) {
     }
     self.glassLayer.frame = found.frame;
 
+    // v0.4.3: 同样修掉「找不到按键层就插 index 0」的坏行为。
+    // 找不到 = 不知道插哪, 那就不插。少一层玻璃无所谓, 键盘不能���是致命的。
     UIView *fg = [self firstKeyLayerInHost:host];
-    NSInteger target = 0;
-    if (fg && fg != found) {
-        NSInteger li = [host.layer.sublayers indexOfObject:fg.layer];
-        if (li != NSNotFound) target = li;
+    if (!fg) {
+        KGLog(@"兜底路径找不到按键层, 放弃插玻璃层");
+        return;
     }
-    [host.layer insertSublayer:self.glassLayer atIndex:(NSUInteger)MAX(0, target)];
+    NSInteger li = [host.layer.sublayers indexOfObject:fg.layer];
+    if (li == NSNotFound) {
+        KGLog(@"兜底路径按键层不在 sublayers 里, 放弃插玻璃层");
+        return;
+    }
+    NSInteger target = li;
+    if (target < 0) target = 0;
+    if (target > (NSInteger)host.layer.sublayers.count) target = (NSInteger)host.layer.sublayers.count;
+    [host.layer insertSublayer:self.glassLayer atIndex:(NSUInteger)target];
     self.glassLayer.hidden = NO;
 
     self.hostView = host;

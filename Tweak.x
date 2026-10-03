@@ -65,6 +65,6 @@
 %ctor {
     @autoreleasepool {
         [KGPrefs registerDefaults];
-        KGLog(@"KeyboardGlass 已加载 (0.4.2)");
+        KGLog(@"KeyboardGlass 已加载 (0.4.3)");
     }
 }
