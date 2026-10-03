@@ -18,6 +18,32 @@ static inline BOOL KGStyleEqual(KGStyle a, KGStyle b) {
         && a.dark == b.dark;
 }
 
+// ======================================================================
+// 【v2.0.0】宿主旧逻辑的开关桩 —— 六个二分开关已整体废弃
+// ======================================================================
+//
+// v1.1.0 有一组开关(SafeMode / ActionGlass / ActionVeil / ActionAssistantBar /
+// ActionKeyBottom / ActionFullscreenWhite), 用来在「宿主进程里改宿主层」
+// 这个前提下做二分。v1.1.0 的探针已经证明**前提不成立**, 所以六个开关
+// 全部废弃, 收敛成一个总闸 HostKeyboardActions(默认关)。
+//
+// 保留这一整块代码是为了**对照**: 万一将来发现宿主路径其实有效,
+// 打开总闸就能立刻复现十三版行为, 不必从 git 历史里翻。
+//
+// 所以这里的桩全部返回固定值, 不再读 UserDefaults:
+//   kKGLegacySafeMode   = NO -> 宿主路径总是「执行档」(v1.1.0 的 SafeMode 默认是
+//                          YES, 等于把宿主路径整个锁死; 这里反过来, 打开总闸就跑完整逻辑)
+//   kKGLegacyFullscreen = NO -> **关键**: v1.1.0 探针全树搜索 _UIRemoteView
+//                          出现 0 次, 这个类在 iOS 16 上根本不存在。
+//                          设成 1 也不会怎样(找不到就不动), 但设 0 明确记录
+//                          「这条路已证伪」。
+static const BOOL kKGLegacySafeMode     = NO;
+static const BOOL kKGLegacyGlass        = YES;
+static const BOOL kKGLegacyVeil         = YES;
+static const BOOL kKGLegacyAssistantBar = YES;
+static const BOOL kKGLegacyKeyBottom    = YES;
+static const BOOL kKGLegacyFullscreen   = NO;
+
 #pragma mark - 崩溃熔断器
 
 static const NSInteger kKGCrashThreshold = 5;
@@ -258,10 +284,8 @@ static UIView *KGKeyLayerIn(UIView *host) {
                                                     userInfo:nil
                                                      repeats:YES];
     [[NSRunLoop mainRunLoop] addTimer:self.workerTimer forMode:NSRunLoopCommonModes];
-    KGLog(@"v1.1.0 已启动: 0.4s 定时器, 稳定性闸=连续2帧相同");
-    KGLog(@"v1.1.0 新增: 五个动作独立开关 + 安全档。十三版每版同时改多个变量, 反馈无法定位, 这一版让用户自己二分");
-    KGLog(@"v1.1.0 默认: 安全档=开(零动作), 全屏白底=关(有嫌疑: 430x932 全屏层, 可能是键盘画面本身)");
-    KGLog(@"v1.1.0 铁律仍生效: 只改 userInteractionEnabled=0 的层");
+    KGLog(@"v2.0.0 宿主旧逻辑已启动: 0.4s 定时器, 稳定性闸=连续2帧相同(仅当「宿主旧逻辑」打开时才走到这里)");
+    KGLog(@"   注意: 该路径要改的 _UIRemoteView 在 iOS 16 上全树 0 次出现, 大概率无效");
 }
 
 - (void)workerTick:(NSTimer *)timer {
@@ -319,7 +343,7 @@ static UIView *KGKeyLayerIn(UIView *host) {
         // v1.1.0: 只有「全屏白底」开关打开时才动它。
         // 这一行在 v1.0.0 是无条件执行的 —— 于是安全档(零动作)名不副实,
         // 键盘收起时仍然会被我们改一个全屏 uie=0 的层。
-        if ([KGPrefs actionFullscreenWhite]) {
+        if (kKGLegacyFullscreen) {
             [self setFullscreenWhiteHidden:YES];
         }
         self.hostView = nil;
@@ -333,12 +357,12 @@ static UIView *KGKeyLayerIn(UIView *host) {
     // 玻璃层已经在树上(this.glassView.superview != nil)就直接 return 了,
     // 新配置要等到下次键盘重建才生效 —— 用户会以为开关没用。
     NSString *sw = [NSString stringWithFormat:@"%d%d%d%d%d%d",
-        [KGPrefs safeMode] ? 1 : 0,
-        [KGPrefs actionGlass] ? 1 : 0,
-        [KGPrefs actionVeil] ? 1 : 0,
-        [KGPrefs actionAssistantBar] ? 1 : 0,
-        [KGPrefs actionKeyBottom] ? 1 : 0,
-        [KGPrefs actionFullscreenWhite] ? 1 : 0];
+        kKGLegacySafeMode ? 1 : 0,
+        kKGLegacyGlass ? 1 : 0,
+        kKGLegacyVeil ? 1 : 0,
+        kKGLegacyAssistantBar ? 1 : 0,
+        kKGLegacyKeyBottom ? 1 : 0,
+        kKGLegacyFullscreen ? 1 : 0];
     if (!self.dirty && self.glassView.superview
         && [sw isEqualToString:self.lastSwitchSig]) {
         return;
@@ -381,7 +405,7 @@ static UIView *KGKeyLayerIn(UIView *host) {
     // 这是二分的第零档。插件照常运行、照常观测写探针, 但**一行都不改视图树**。
     // 用途: 区分「白屏是插件引起的」与「白屏与插件无关」——
     // 十三版之所以卡住, 就是从来没做过这个最基础的对照。
-    if ([KGPrefs safeMode]) {
+    if (kKGLegacySafeMode) {
         [self teardownGlassOnly];
         [self detectFullscreenWhite:host];
         [self writeProbe:host material:material];
@@ -392,7 +416,7 @@ static UIView *KGKeyLayerIn(UIView *host) {
     // 【为什么要拆开关】十三版每版同时改多个变量, 用户的「还是没解决」
     // 只能说明「这四个的组合不对」, 指出不了是哪个。拆开之后一次安装
     // 就能二分出病根, 不用重装十四次。
-    if ([KGPrefs actionGlass]) {
+    if (kKGLegacyGlass) {
         [self placeGlass:host];
         self.glassView.hidden = NO;
         [self applyStyle:material];
@@ -400,11 +424,11 @@ static UIView *KGKeyLayerIn(UIView *host) {
         [self teardownGlassOnly];
     }
 
-    if ([KGPrefs actionVeil])         { [self applyVeilLayersInHost:host]; }
-    if ([KGPrefs actionAssistantBar]) { [self applyAssistantBar:host]; }
-    if ([KGPrefs actionKeyBottom])    { [self applyKeyBottomDim:host]; }
+    if (kKGLegacyVeil)         { [self applyVeilLayersInHost:host]; }
+    if (kKGLegacyAssistantBar) { [self applyAssistantBar:host]; }
+    if (kKGLegacyKeyBottom)    { [self applyKeyBottomDim:host]; }
     // 【v1.1.0 铁律】「找」无条件, 「动」才看开关。
-    // 早先写成 `if ([KGPrefs actionFullscreenWhite]) { [self applyFullscreenWhite:host]; }`
+    // 早先写成 `if (kKGLegacyFullscreen) { [self applyFullscreenWhite:host]; }`
     // 是错的: 开关默认关 → 定位根本不执行 → 探针写 fullscreenWhite=none,
     // 而 none 既可能是「不存在」也可能是「没去找」。这正是 v1.0.0 让我
     // 无法判断的同一个坑, 不能在排查版里再犯一次。
@@ -614,7 +638,7 @@ static UIView *KGKeyLayerIn(UIView *host) {
 - (void)applyFullscreenWhite:(UIView *)host {
     [self detectFullscreenWhite:host];
     // 默认关。所以装上 v1.1.0 的默认状态是「只观察不动」。
-    if ([KGPrefs actionFullscreenWhite]) {
+    if (kKGLegacyFullscreen) {
         [self setFullscreenWhiteHidden:YES];
     }
 }
@@ -652,7 +676,7 @@ static UIView *KGKeyLayerIn(UIView *host) {
     }
     KGLog(@"全屏白底层定位结果: %@ (开关=%@, 未开时只记录不动)",
           self.fullscreenWhiteView ? NSStringFromClass(self.fullscreenWhiteView.class) : @"none",
-          [KGPrefs actionFullscreenWhite] ? @"开" : @"关");
+          kKGLegacyFullscreen ? @"开" : @"关");
 }
 
 - (void)setFullscreenWhiteHidden:(BOOL)hidden {
@@ -775,12 +799,12 @@ static UIView *KGKeyLayerIn(UIView *host) {
     // 少了这一行, 每一份回传的探针都要靠猜。
     NSString *switches = [NSString stringWithFormat:
         @"safe=%d|glass=%d|veil=%d|bar=%d|key=%d|fsw=%d",
-        [KGPrefs safeMode] ? 1 : 0,
-        [KGPrefs actionGlass] ? 1 : 0,
-        [KGPrefs actionVeil] ? 1 : 0,
-        [KGPrefs actionAssistantBar] ? 1 : 0,
-        [KGPrefs actionKeyBottom] ? 1 : 0,
-        [KGPrefs actionFullscreenWhite] ? 1 : 0];
+        kKGLegacySafeMode ? 1 : 0,
+        kKGLegacyGlass ? 1 : 0,
+        kKGLegacyVeil ? 1 : 0,
+        kKGLegacyAssistantBar ? 1 : 0,
+        kKGLegacyKeyBottom ? 1 : 0,
+        kKGLegacyFullscreen ? 1 : 0];
 
     NSString *sig = [NSString stringWithFormat:@"%@|%@|%@|%@|%@|%@|%.3f|%@",
         NSStringFromCGRect(host.frame), veil, bar, kb, fwDesc,
@@ -799,12 +823,12 @@ static UIView *KGKeyLayerIn(UIView *host) {
         @"   glass=%@ 通透度=%.2f 底板=%.2f 材质=%ld\n",
         [NSDate date], NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
         key ? NSStringFromClass(key.class) : @"none",
-        [KGPrefs safeMode] ? @"[安全档·零动作]" : @"[执行档]",
-        [KGPrefs actionGlass] ? @"玻璃=开" : @"玻璃=关",
-        [KGPrefs actionVeil] ? @"浓白=开" : @"浓白=关",
-        [KGPrefs actionAssistantBar] ? @"助手条=开" : @"助手条=关",
-        [KGPrefs actionKeyBottom] ? @"底板=开" : @"底板=关",
-        [KGPrefs actionFullscreenWhite] ? @"全屏白底=开" : @"全屏白底=关",
+        kKGLegacySafeMode ? @"[安全档·零动作]" : @"[执行档]",
+        kKGLegacyGlass ? @"玻璃=开" : @"玻璃=关",
+        kKGLegacyVeil ? @"浓白=开" : @"浓白=关",
+        kKGLegacyAssistantBar ? @"助手条=开" : @"助手条=关",
+        kKGLegacyKeyBottom ? @"底板=开" : @"底板=关",
+        kKGLegacyFullscreen ? @"全屏白底=开" : @"全屏白底=关",
         veil, bar, kb, fwDesc,
         [self.glassView isDescendantOfView:host] ? @"in" : @"out",
         (double)[KGPrefs glassTransparency], (double)[KGPrefs keyplaneDim], (long)material]);

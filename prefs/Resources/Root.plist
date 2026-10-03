@@ -8,7 +8,9 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>给系统键盘换上 iOS 26 风格的玻璃材质。改完切一次键盘（或收起再弹出）即可看到效果。仅对系统键盘生效，第三方输入法（微信输入法等）不会被改动。</string>
+			<string>给键盘换上 iOS 26 风格的玻璃材质。2.0.0 起目标改为**微信输入法**（系统键盘的按键画在 App 进程里，微信输入法的画在它自己的扩展进程里，之前十三版一直在错误的进程里找按键，所以怎么改都没反应）。
+
+**这一版只探测、不改动界面**，先把按键层次看清楚再动手。请保持默认设置，唤出微信输入法用十几秒，然后回传探针文件。</string>
 			<key>label</key>
 			<string>键盘液态玻璃</string>
 		</dict>
@@ -32,11 +34,13 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>这五个开关是 1.1.0 新增的，之前每一版都同时改好几处、让你重装去试，所以一直分不清是哪一处的问题。现在装一次就能自己试出是哪一处。改完收起再弹出键盘即可生效。
+			<string>2.0.0 是重大改版：目标从「系统键盘」换成「微信输入法」。
 
-「安全档」打开时插件完全不碰键盘，只在旁边记录数据。**请先保持它打开**——如果关着它问题依旧，说明问题与插件无关，那就别再折腾了，直接告诉我。换句话说：这一档是判断「还要不要继续排查」的开关，不是普通功能项。</string>
+探针实锤的原因：系统键盘的按键画在 App 进程里，而微信输入法的按键是**在它自己的输入法扩展进程里画好后嵌进来的**。之前十三版一直在 App 进程里找按键、找都找不到，所以改什么都没反应。
+
+这一版**只探测、不改动任何界面**，目的是先把微信输入法的按键层次看清楚了，再决定怎么改。请保持默认开启，唤出微信输入法用一会儿，然后回传探针文件。</string>
 			<key>label</key>
-			<string>排查用（先看这里）</string>
+			<string>2.0.0 微信输入法（先探不改）</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -48,9 +52,9 @@
 			<key>get</key>
 			<string>readPreferenceValue:</string>
 			<key>key</key>
-			<string>SafeMode</string>
+			<string>ExtProbe</string>
 			<key>label</key>
-			<string>安全档（一个动作都不执行）</string>
+			<string>扩展进程探针（推荐保持开启）</string>
 			<key>set</key>
 			<string>setPreferenceValue:specifier:</string>
 		</dict>
@@ -58,75 +62,11 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>关掉安全档后，这五项逐项控制插件的五处改动。排查建议：一次只关一项，看问题出没消失——这样能精确定位到是那一项。
+			<string>保留上一版的做法（只对系统键盘生效）。**默认关闭**，因为探针已经确认它要找的那一层在 iOS 16 上根本不存在。
 
-「关全屏白底」默认关着。之前那一版会自动去关一个铺满全屏的层，但你截的图里键盘整个不见了，很可能就是它把那层（可能是键盘自己的画面）藏掉了。它是唯一有嫌疑的项，所以改成由你决定要不要开。</string>
+除非你想回头验证「系统键盘到底能不能改」，否则不用打开它。打开它会重新开始改动系统键盘的视图，之前十三个版本的问题会原样回来。</string>
 			<key>label</key>
-			<string>逐项开关（排查用）</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>default</key>
-			<true/>
-			<key>defaults</key>
-			<string>com.banli.keyboardglass.preferences</string>
-			<key>get</key>
-			<string>readPreferenceValue:</string>
-			<key>key</key>
-			<string>ActionGlass</string>
-			<key>label</key>
-			<string>1· 插玻璃层</string>
-			<key>set</key>
-			<string>setPreferenceValue:specifier:</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>default</key>
-			<true/>
-			<key>defaults</key>
-			<string>com.banli.keyboardglass.preferences</string>
-			<key>get</key>
-			<string>readPreferenceValue:</string>
-			<key>key</key>
-			<string>ActionVeil</string>
-			<key>label</key>
-			<string>2 · 调淡系统浓白底</string>
-			<key>set</key>
-			<string>setPreferenceValue:specifier:</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>default</key>
-			<true/>
-			<key>defaults</key>
-			<string>com.banli.keyboardglass.preferences</string>
-			<key>get</key>
-			<string>readPreferenceValue:</string>
-			<key>key</key>
-			<string>ActionAssistantBar</string>
-			<key>label</key>
-			<string>3 · 关顶部灰条</string>
-			<key>set</key>
-			<string>setPreferenceValue:specifier:</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>default</key>
-			<true/>
-			<key>defaults</key>
-			<string>com.banli.keyboardglass.preferences</string>
-			<key>get</key>
-			<string>readPreferenceValue:</string>
-			<key>key</key>
-			<string>ActionKeyBottom</string>
-			<key>label</key>
-			<string>4 · 调淡按键底板</string>
-			<key>set</key>
-			<string>setPreferenceValue:specifier:</string>
+			<string>旧版逻辑（不建议开）</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -138,9 +78,9 @@
 			<key>get</key>
 			<string>readPreferenceValue:</string>
 			<key>key</key>
-			<string>ActionFullscreenWhite</string>
+			<string>HostKeyboardActions</string>
 			<key>label</key>
-			<string>5 · 关全屏白底（有风险，默认关）</string>
+			<string>启用 1.1.0 及更早的宿主逻辑</string>
 			<key>set</key>
 			<string>setPreferenceValue:specifier:</string>
 		</dict>
@@ -182,7 +122,11 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>1.1.0 是排查版。之前十三版每版同时改好几处、让你重装去试，所以一直分不清是哪一处的问题。这一版把五处改动拆成五个开关，装一次就能自己试出是哪一处。请从最上面的「安全档」开始看。</string>
+			<string>2.0.0：目标改为微信输入法，改为在输入法扩展进程里探测。
+1.1.0：把五处改动拆成五个开关做二分排查。
+1.0.0：架构重写，确立「只改 uie=0 的层」这条铁律。
+
+这一版没有新增视觉效果，只有探针。收到你的回传之后，我才会做第一版真正能看出玻璃效果的版本。</string>
 			<key>label</key>
 			<string>版本说明</string>
 		</dict>
@@ -400,7 +344,7 @@
 			<key>cellClass</key>
 			<string>KGSliderCell</string>
 			<key>default</key>
-			<real>0.70</real>
+			<real>0.7</real>
 			<key>defaults</key>
 			<string>com.banli.keyboardglass.preferences</string>
 			<key>get</key>
@@ -484,7 +428,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>板栗仁 · KeyboardGlass 1.1.0</string>
+			<string>板栗仁 · KeyboardGlass 2.0.0</string>
 		</dict>
 	</array>
 	<key>title</key>

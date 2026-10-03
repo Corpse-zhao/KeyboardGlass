@@ -2,6 +2,7 @@
 #import "KGPrefs.h"
 #import "KGGlassView.h"
 #import "KGKeyboardInstaller.h"
+#import "KGExtProbe.h"
 
 // Logos 只会给 %hook 的目标生成前向声明 (@class), 那样编译器不知道它是
 // UIViewController 子类, 取 self.view 会报 "property 'view' cannot be found
@@ -71,16 +72,50 @@
 
 %end
 
-// v0.3.0 起**不再 hook UIInputViewController**。
-// 那是第三方输入法 (微信输入法等) 的入口 —— 它们的键盘跑在独立的
-// Keyboard Extension 进程、视图全部自绘, 我们对系统键盘那套锚点假设在那里
-// 完全不成立。用户实测在微信输入法上同样「打不了字」, 所以这条路径整个删掉。
-// 后续真要做第三方输入法, 必须单独立开关、且默认关闭。
-
+// ======================================================================
+// 【v2.0.0】微信输入法适配 —— 启用扩展进程探针
+// ======================================================================
+//
+// 【v0.3.0 当年的注释, 现在兑现】
+// 原话: 「后续真要做第三方输入法, 必须单独立开关、且默认关闭。」
+// 现在正是那个时候。开关就是「启用 - 扩展进程探针」(KGPrefs.extProbe),
+// **默认开** —— 与当年「默认关」相反, 理由见下。
+//
+// 【为什么不默认关】
+// 这一版**不改任何视图**, 只 dump。默认关的话用户会以为插件没生效,
+// 白白再发一轮探针。探针的代价是零(只读视图树 + 写一个文件),
+// 收益是「第一次真正看清按键区长什么样」。
+//
+// 【v0.3.0 当年为什么删掉 UIInputViewController 这条路】
+// 当时的判断是「第三方输入法视图全部自绘, 系统键盘那套锚点假设不成立」。
+// 这个判断**对了一半**: 锚点假设确实不成立, 但不是因为跨进程看不见, 而是因为
+// 当时 hook 的是宿主进程里的 UIInputViewController(那是系统自己的容器),
+// 而真正的第三方键盘在**另一个进程**里。
+// 2026-10-03 的探针把这一点钉死了: 宿主树里只有 _UIRemoteKeyboardPlaceholderView。
+//
+// ----------------------------------------------------------------------
 %ctor {
     @autoreleasepool {
         [KGPrefs registerDefaults];
-        [[KGKeyboardInstaller shared] startWorker];
-        KGLog(@"KeyboardGlass 已加载 (1.1.0)");
+
+        // 扩展进程探针。宿主进程里它是空转(扫不到键盘形状的视图),
+        // 扩展进程里它负责 dump 微信输入法的按键层级。
+        if ([KGPrefs extProbe]) {
+            [KGExtProbe start];
+        }
+
+        // 宿主进程的旧逻辑**默认关闭**。
+        // 理由: v1.1.0 探针已证明它改的那些层(全屏白底 _UIRemoteView)
+        // 在 iOS 16 上根本不存在, 所谓「白屏」与插件无关。继续跑它
+        // 只会让用户分不清是哪个开关在起作用, 而且改过 alpha 的层
+        // 可能残留(插件被禁用时不会自动复原)。
+        if ([KGPrefs hostKeyboardActions]) {
+            [[KGKeyboardInstaller shared] startWorker];
+        }
+
+        KGLog(@"KeyboardGlass 已加载 (2.0.0)");
+        KGLog(@"v2.0.0: 扩展进程探针=%@ 宿主旧逻辑=%@",
+              [KGPrefs extProbe] ? @"开" : @"关",
+              [KGPrefs hostKeyboardActions] ? @"开" : @"关");
     }
 }

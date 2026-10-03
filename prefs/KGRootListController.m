@@ -21,12 +21,14 @@ static void KGProbe(NSString *msg) {
 // 6 = v0.6.0 删掉 GlassOverKeys (实测两次导致打不了字), 新增「按键区底色调淡」。
 // 8 = v1.0.0 架构重写: 删掉 WorkMode 二分隔离档位, 新增「玻璃通透度」。
 // 9 = v1.1.0 新增五个动作的独立开关 + 安全档。
+// 10 = v2.0.0 架构转向微信输入法: 六个二分开关整体废弃, 换成
+//      「扩展进程探针(默认开) + 宿主旧逻辑(默认关)」。
 //
 // **必须和 KGPrefs.m 里的 kKGParamsVersion 保持一致。**
 // v0.4.3 之前两边是 4 和 5 不一致 —— 插件进程先迁移到自己的版本号, 设置
 // 进程再迁移一次, 谁先跑谁说了算, 迁移结果不确定。这类「双份常量」必须
 // 当成一个字段看待, 改一边就要同时改另一边。
-static const NSInteger kKGParamsVersion = 9;
+static const NSInteger kKGParamsVersion = 10;
 static const double kKGRecommendedBlur       = 18.0;
 static const double kKGRecommendedRefraction = 14.0;
 static const double kKGRecommendedHighlight  = 0.55;
@@ -65,17 +67,20 @@ static void KGMigrateParamsIfNeeded(NSUserDefaults *defaults) {
     // 留着它们, 用户会拖到「① 纯探针」然后以为插件没生效。
     [defaults removeObjectForKey:@"WorkMode"];
     [defaults removeObjectForKey:@"GlassOverKeys"];
-    // v1.1.0: 二分的起点必须是「什么都不做」。
-    // 安全档强制写成 YES —— 新装用户不该一装就被一个我们还没验证过
-    // 有效性的动作影响键盘。「关全屏白底」强制 NO, 那一项有嫌疑。
-    [defaults setObject:@YES forKey:@"SafeMode"];
-    [defaults setObject:@YES forKey:@"ActionGlass"];
-    [defaults setObject:@YES forKey:@"ActionVeil"];
-    [defaults setObject:@YES forKey:@"ActionAssistantBar"];
-    [defaults setObject:@YES forKey:@"ActionKeyBottom"];
-    [defaults setObject:@NO  forKey:@"ActionFullscreenWhite"];
+    // v2.0.0: 六个二分开关**彻底清掉**。它们的整个设计前提是
+    // 「在宿主 App 进程里改宿主层就能调出玻璃效果」, 而 v1.1.0 探针已经
+    // 证明前提不成立(宿主树里一个按键视图都没有, 只有远程占位视图)。
+    // 留着它们只会让用户面对六个不起作用的开关, 以为是自己操作错了。
+    for (NSString *dead in @[@"SafeMode", @"ActionGlass", @"ActionVeil",
+                             @"ActionAssistantBar", @"ActionKeyBottom",
+                             @"ActionFullscreenWhite"]) {
+        [defaults removeObjectForKey:dead];
+    }
+    // 探针开(只读, 零副作用), 宿主旧逻辑关。
+    [defaults setObject:@YES forKey:@"ExtProbe"];
+    [defaults setObject:@NO  forKey:@"HostKeyboardActions"];
     [defaults synchronize];
-    KGProbe([NSString stringWithFormat:@"[migrate] 参数版本 %ld -> %ld, 已写入 v1.1.0 推荐值 + 安全档已开 + 废弃项已清除 + 熔断计数已清零",
+    KGProbe([NSString stringWithFormat:@"[migrate] 参数版本 %ld -> %ld, 已写入 v2.0.0 推荐值 + 扩展探针已开 + 宿主旧逻辑已关 + v1.1 六个开关已清除 + 熔断计数已清零",
              (long)old, (long)kKGParamsVersion]);
 }
 
@@ -151,15 +156,16 @@ static void KGMigrateParamsIfNeeded(NSUserDefaults *defaults) {
     [defaults setObject:@(kKGRecommendedKeyDim)     forKey:@"KeyplaneDim"];
     [defaults removeObjectForKey:@"WorkMode"];
     [defaults removeObjectForKey:@"GlassOverKeys"];
-    // 恢复默认 = 回到二分的起点: 安全档开、全屏白底关。
-    [defaults setObject:@YES forKey:@"SafeMode"];
-    [defaults setObject:@YES forKey:@"ActionGlass"];
-    [defaults setObject:@YES forKey:@"ActionVeil"];
-    [defaults setObject:@YES forKey:@"ActionAssistantBar"];
-    [defaults setObject:@YES forKey:@"ActionKeyBottom"];
-    [defaults setObject:@NO  forKey:@"ActionFullscreenWhite"];
+    // v2.0.0 恢复默认 = 探针开、宿主旧逻辑关, 并清掉已废弃的六个开关。
+    for (NSString *dead in @[@"SafeMode", @"ActionGlass", @"ActionVeil",
+                             @"ActionAssistantBar", @"ActionKeyBottom",
+                             @"ActionFullscreenWhite"]) {
+        [defaults removeObjectForKey:dead];
+    }
+    [defaults setObject:@YES forKey:@"ExtProbe"];
+    [defaults setObject:@NO  forKey:@"HostKeyboardActions"];
     [defaults synchronize];
-    KGProbe(@"[reset] 已恢复 v1.0.0 推荐参数 (废弃项已清除)");
+    KGProbe(@"[reset] 已恢复 v2.0.0 推荐参数 (探针开/宿主旧逻辑关, 废弃开关已清除)");
     _specifiers = nil;
     [self reloadSpecifiers];
 }
