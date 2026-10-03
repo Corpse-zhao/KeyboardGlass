@@ -41,7 +41,7 @@
 			<key>key</key>
 			<string>WorkMode</string>
 			<key>default</key>
-			<integer>0</integer>
+			<integer>2</integer>
 			<key>defaults</key>
 			<string>com.banli.keyboardglass.preferences</string>
 			<key>detail</key>
@@ -50,7 +50,7 @@
 			<array>
 				<string>① 纯探针（什么都不改）</string>
 				<string>② 只隐藏原生背景</string>
-				<string>③ 完整·插入玻璃层</string>
+				<string>③ 完整·插入玻璃层（推荐）</string>
 			</array>
 			<key>validValues</key>
 			<array>
@@ -68,7 +68,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>排查用。默认「① 纯探针」：插件只记录信息，一个界面元素都不碰。请依次往上试，先确认哪一档开始打不了字——①都打不了字就说明问题不在玻璃层，而在插件注入本身。改完切一次键盘即可生效。</string>
+			<string>排查用。默认「③ 完整」：玻璃层是纯图层而不是视图，不参与触摸命中，正常不会挡住打字。只有怀疑插件本身导致问题时才降到 ①——①都打不了字就说明问题不在玻璃效果。改完切一次键盘即可生效。</string>
 		</dict>
 
 		<dict>
@@ -208,7 +208,7 @@
 			<key>key</key>
 			<string>LiquidVeil</string>
 			<key>default</key>
-			<real>0.3</real>
+			<real>0.42</real>
 			<key>min</key>
 			<real>0</real>
 			<key>max</key>
@@ -356,7 +356,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>板栗仁 · KeyboardGlass 0.3.0</string>
+			<string>板栗仁 · KeyboardGlass 0.4.0</string>
 		</dict>
 
 	</array>

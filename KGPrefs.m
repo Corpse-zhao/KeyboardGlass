@@ -10,13 +10,18 @@ NSString * const KGPrefsSuiteName = @"com.banli.keyboardglass.preferences";
 static const CGFloat kKGDefaultBlur         = 12.0;
 static const CGFloat kKGDefaultRefraction   = 10.0;
 static const CGFloat kKGDefaultHighlight    = 0.65;
-static const CGFloat kKGDefaultVeil         = 0.30;
+// v0.4.0 从 0.30 提到 0.42: 隐藏原生背板之后, 键盘底色全靠玻璃层的 veil 撑着。
+// 0.30 × 0.65 = 0.195 的白几乎等于没有, 键盘透出底下的 App 内容会直接影响
+// 按键文字的可读性, 用户也会怀疑「是不是没生效」。0.42 → 0.273, 既有明显
+// 的玻璃感, 又保证字看得清。
+static const CGFloat kKGDefaultVeil         = 0.42;
 // 默认 0: 先不做圆角。圆角会让键盘四角露出下层内容, 而原生背板仍是直角,
 // 两者叠加反而难看 —— 等基础材质确认无误后再作为第二步开启。
 static const CGFloat kKGDefaultCornerRadius = 0.0;
 
-// 参数版本号。1 = 早期那组不可见的默认值; 2 = 现在这组。
-static const NSInteger kKGParamsVersion = 2;
+// 参数版本号。1 = 早期那组不可见的默认值; 2 = 液态玻璃推荐值;
+// 3 = 二分隔离结束, 工作模式默认切到「完整」。
+static const NSInteger kKGParamsVersion = 3;
 
 static BOOL kKGDebugEnabled = NO;
 
@@ -54,10 +59,9 @@ void KGLog(NSString *format, ...) {
         @"HideNativeBackdrop": @YES,
         @"DebugLog":           @NO,
         @"ShowLayerOutline":   @NO,
-        // 默认「纯探针」: 一个节点都不碰, 只写探针。
-        // 用户反馈「键盘打不了字」但始终定位不到是改视图树还是 hook 本身,
-        // 所以默认从最干净的基准开始, 由用户逐档往上试。
-        @"WorkMode":           @(KGWorkModeProbe),
+        // 默认「完整」: v0.4.0 起玻璃层是纯 CALayer, 不可能挡触摸;
+        // 二分隔离阶段为了定位问题才默认停在探针档, 现在不需要了。
+        @"WorkMode":           @(KGWorkModeFull),
     }];
     kKGDebugEnabled = [[self defaults] boolForKey:@"DebugLog"];
     [self runParamsMigrationIfNeeded];
@@ -79,6 +83,11 @@ void KGLog(NSString *format, ...) {
     [d setObject:@(kKGDefaultVeil)       forKey:@"LiquidVeil"];
     [d setObject:@(kKGDefaultCornerRadius) forKey:@"CornerRadius"];
     [d setObject:@YES                    forKey:@"HideNativeBackdrop"];
+    // v0.4.0: 二分隔离已经完成使命 (用户确认「现在可以打字了」), 触摸问题定位在
+    // 往键盘里插 UIView, 而玻璃层早已改成纯 CALayer, 机制上不可能挡触摸。
+    // 所以这里把工作模式一并推到「完整」。用户要是又手动调回低档, 后续
+    // 版本号已经到 3, 不会再被覆盖。
+    [d setObject:@(KGWorkModeFull)        forKey:@"WorkMode"];
     [d synchronize];
 }
 
@@ -172,9 +181,9 @@ void KGLog(NSString *format, ...) {
 
 + (KGWorkMode)workMode {
     NSUserDefaults *d = [self defaults];
-    if ([d objectForKey:@"WorkMode"] == nil) return KGWorkModeProbe;
+    if ([d objectForKey:@"WorkMode"] == nil) return KGWorkModeFull;
     NSInteger raw = [d integerForKey:@"WorkMode"];
-    if (raw < KGWorkModeProbe || raw > KGWorkModeFull) return KGWorkModeProbe;
+    if (raw < KGWorkModeProbe || raw > KGWorkModeFull) return KGWorkModeFull;
     return (KGWorkMode)raw;
 }
 

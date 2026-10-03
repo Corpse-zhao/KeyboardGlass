@@ -75,13 +75,29 @@ static BOOL KGLooksLikeKeyboardForeground(UIView *view) {
     return KGContainsKeyboardContent(view, 0);
 }
 
-// 这个视图能不能安全地被隐藏 (hideNativeBackdrop)。
-// 名字带 Backdrop 才算背景, 还要确认肚子里没有按键内容 ——
-// alpha=0 的视图 hitTest 会跳过, 藏错对象会把整块键盘连触摸一起弄没。
+// KG_BACKDROP_SCAN_NOTE (v0.4.0 真正的病根):
+//   v0.2.x~0.3.x 的 backgroundInHost: 只扫宿主的**直接孩子**, 于是只命中了
+//   那个 45pt 的助手条背景 UIKBInputBackdropView。真正的主体背景是嵌在
+//   UIView{{0,45},{430,243}} 容器子树里的 UIKBInputBackdropView → UIKBBackdropView,
+//   它压根不是直接孩子, 于是从来没被隐藏过。后果完全对得上用户反馈
+//   「顶部透明了, 主体没变化」: 顶部那块被藏了, 主体那块 (白 0.10) 还压在
+//   玻璃层下面, 玻璃层采到的就是它自己 —— 白上加白, 等于什么都没发生。
+//
+// 所以改成**递归 BFS**: 名字带 Backdrop、子树里没有按键内容、宽度接近整屏
+// 的一律收进来。命中一个就不再往它子树里下钻 (藏外层自然连带藏内层,
+// 记录与恢复都只需一条, 不会因为父子都命中而把状态搞乱)。
 static BOOL KGIsSafeToHide(UIView *view) {
     NSString *name = NSStringFromClass(view.class);
     if (![name containsString:@"Backdrop"]) return NO;
-    return !KGContainsKeyboardContent(view, 0);
+    // 肚子里有按键内容的一律不能碰: alpha<=0.01 的视图会被 hitTest 跳过,
+    // 藏错对象会把整块键盘连触摸一起弄没 (v0.2.0 实锤过)。
+    if (KGContainsKeyboardContent(view, 0)) return NO;
+    // 背景板都是整屏宽的。这条同时排掉了某些按键内部自带的小 backdrop。
+    CGFloat screenWidth = view.window ? view.window.bounds.size.width
+                                      : UIScreen.mainScreen.bounds.size.width;
+    if (screenWidth <= 0) return NO;
+    if (view.frame.size.width < screenWidth * 0.8) return NO;
+    return YES;
 }
 
 static BOOL KGStyleEqual(KGStyle a, KGStyle b) {
@@ -160,11 +176,13 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 @interface KGKeyboardInstaller ()
 @property (nonatomic, strong) KGGlassLayer *glassLayer;
 @property (nonatomic, weak)   UIView *hostView;          // 锁定的宿主
-@property (nonatomic, weak)   UIView *nativeBackdrop;    // 只用于 hideNativeBackdrop
-@property (nonatomic, assign) CGFloat nativeBackdropAlpha;
-@property (nonatomic, assign) BOOL hasNativeBackdrop;
-@property (nonatomic, assign) KGStyle appliedStyle;
+// 键 = 被隐藏的原生背景层 (弱引用, 键盘重建时自动失效)
+// 值 = 它的原始 alpha (恢复用)
+// v0.4.0 起是「一组」而不是「一个」—— 见 KG_BACKDROP_SCAN_NOTE。
+@property (nonatomic, strong) NSMapTable<UIView *, NSNumber *> *hiddenBackdrops;
+@property (nonatomic, strong) NSArray<UIView *> *cachedBackdrops;  // 扫描结果缓存
 @property (nonatomic, assign) BOOL hasAppliedStyle;
+@property (nonatomic, assign) KGStyle appliedStyle;
 @property (nonatomic, assign) BOOL didDumpStableTree;
 @property (nonatomic, assign) BOOL didRunTouchDiag;
 @property (nonatomic, copy)   NSString *lastProbeSignature;
@@ -236,7 +254,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
               NSStringFromCGRect(host.frame), (long)mode);
         self.hostView = host;
         [self.glassLayer removeFromSuperlayer];
-        [self restoreNativeBackdrop];
+        [self restoreNativeBackdrops];
         self.glassLayer.hidden = YES;
 
         KGDumpHostChildren(host, mode == KGWorkModeProbe ? @"锁定宿主(纯探针)" : @"锁定宿主");
@@ -247,17 +265,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     if (mode != KGWorkModeFull && self.glassLayer.superlayer) {
         KGLog(@"工作模式降到 %ld, 撤掉已插入的玻璃层", (long)mode);
         [self.glassLayer removeFromSuperlayer];
-        [self restoreNativeBackdrop];
-    }
-
-    // 记住原生背景层 (Hide / Full 都要用)
-    if (mode != KGWorkModeProbe && !self.hasNativeBackdrop) {
-        UIView *bg = [self backgroundInHost:host];
-        if (bg) {
-            self.nativeBackdrop = bg;
-            self.nativeBackdropAlpha = bg.alpha;
-            self.hasNativeBackdrop = YES;
-        }
+        [self restoreNativeBackdrops];
     }
 
     if (mode == KGWorkModeFull) {
@@ -267,7 +275,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     }
 
     if (mode != KGWorkModeProbe) {
-        [self enforceNativeBackdropState];
+        [self enforceNativeBackdropStateInHost:host];
     }
 
     [self writeInstallProbeWithHost:host material:material mode:mode];
@@ -358,27 +366,46 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     return best;
 }
 
-// 宿主直接孩子里, 最靠上的那个「按键前景」
-- (UIView *)topmostForegroundInHost:(UIView *)host {
+// 宿主直接孩子里, **最靠下的那个真正含按键内容**的视图。
+//
+// 为什么不能用「名字带 Keyboard 的」当按键层 (v0.4.0 修正):
+//   UIKeyboardDockView 类名里带 Keyboard, 但它 alpha=0, 是个空壳占位层,
+//   按名字判定会把它当成按键区, 于是玻璃层插到它下面 —— 而真正的主体背景
+//   容器 (UIView{{0,45},...}) 恰好在它上面, 玻璃层又被压回背景之下。
+//   判据换成「子树里确实有 Keyplane / KeyView / KeyboardLayout」, 这是按键
+//   的定义, 不受类名命名干扰。
+//
+// 玻璃层插到这一层之下 = 所有背景之上、所有按键之下。
+- (UIView *)firstKeyLayerInHost:(UIView *)host {
     NSArray<UIView *> *subs = host.subviews;
-    for (NSInteger i = (NSInteger)subs.count - 1; i >= 0; i--) {
+    for (NSUInteger i = 0; i < subs.count; i++) {
         UIView *sub = subs[i];
-        if (KGLooksLikeKeyboardForeground(sub)) return sub;
+        if (KGContainsKeyboardContent(sub, 0)) return sub;
     }
     return nil;
 }
 
-// 宿主直接孩子里名字带 Backdrop 的最大者。只用于决定要不要隐藏它。
-- (UIView *)backgroundInHost:(UIView *)host {
-    UIView *byName = nil;
-    CGFloat best = 0;
-    for (UIView *sub in host.subviews) {
-        NSString *name = NSStringFromClass(sub.class);
-        if (![name containsString:@"Backdrop"]) continue;
-        CGFloat area = sub.frame.size.width * sub.frame.size.height;
-        if (area > best) { best = area; byName = sub; }
+// 递归找出宿主里所有可以安全隐藏的原生背景层。
+// BFS + 命中即止: 找到一个就不再往它子树里钻 —— 藏外层自然连带藏内层,
+// 避免父子都命中导致记录/恢复状态错乱。
+- (NSArray<UIView *> *)backdropsInHost:(UIView *)host {
+    NSMutableArray<UIView *> *found = [NSMutableArray array];
+    if (!host) return found;
+
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:host];
+    NSUInteger guard = 0;
+    while (queue.count > 0 && guard++ < 4000) {
+        UIView *current = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if (!current) continue;
+
+        if (current != host && KGIsSafeToHide(current)) {
+            [found addObject:current];
+            continue;
+        }
+        [queue addObjectsFromArray:current.subviews];
     }
-    return byName;
+    return found;
 }
 
 #pragma mark - 安装与拆卸
@@ -398,19 +425,22 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     CALayer *hostLayer = host.layer;
 
     if (self.glassLayer.superlayer != hostLayer) {
-        // 首次进场: 插到「按键前景」那一层的下面
-        UIView *fg = [self topmostForegroundInHost:host];
+        // 首次进场: 插到「第一个按键层」的下面 —— 即所有背景之上、所有按键之下
+        UIView *fg = [self firstKeyLayerInHost:host];
         NSInteger target = 0;
         if (fg) {
             NSInteger li = [hostLayer.sublayers indexOfObject:fg.layer];
             if (li != NSNotFound) target = li;
         }
         [hostLayer insertSublayer:self.glassLayer atIndex:(NSUInteger)MAX(0, target)];
+        KGLog(@"玻璃层入位: host=%@ sublayers=%lu 目标位置=%ld (前景=%@)",
+              NSStringFromClass(host.class), (unsigned long)hostLayer.sublayers.count,
+              (long)target, fg ? NSStringFromClass(fg.class) : @"none");
         return;
     }
 
     // 已在宿主里: 平时绝不动它 (避免触发布局), 只在压到按键上面时纠正一次
-    UIView *fg = [self topmostForegroundInHost:host];
+    UIView *fg = [self firstKeyLayerInHost:host];
     if (!fg) return;
     NSInteger gi = [hostLayer.sublayers indexOfObject:self.glassLayer];
     NSInteger fi = [hostLayer.sublayers indexOfObject:fg.layer];
@@ -420,12 +450,39 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     }
 }
 
-- (void)enforceNativeBackdropState {
-    UIView *backdrop = self.nativeBackdrop;
-    if (!backdrop || !self.hasNativeBackdrop) return;
-    if (backdrop.superview == nil) return;
-    if (!KGIsSafeToHide(backdrop)) return;
-    backdrop.alpha = [KGPrefs hideNativeBackdrop] ? 0.0 : self.nativeBackdropAlpha;
+// 隐藏 / 恢复原生背景层。v0.4.0: 递归收集全宿主, 不再只挑一个。
+//
+// 性能: backdropsInHost: 是一次全子树 BFS (上限 4000 节点), 而 layoutSubviews
+// 在键盘动画期间每秒能走几十次。所以扫出来的结果缓存下来复用, 只在
+// 「没扫过」或「缓存里的视图已经离树」时重扫 —— 重扫后仍然是一次 BFS,
+// 但平时只是给几个视图重新赋 alpha, 可以忽略。
+- (void)enforceNativeBackdropStateInHost:(UIView *)host {
+    if (!self.hiddenBackdrops) {
+        self.hiddenBackdrops = [NSMapTable weakToStrongObjectsMapTable];
+    }
+
+    BOOL needScan = (self.cachedBackdrops.count == 0);
+    if (!needScan) {
+        for (UIView *bg in self.cachedBackdrops) {
+            if (!bg.superview) { needScan = YES; break; }
+        }
+    }
+    if (needScan) {
+        self.cachedBackdrops = [self backdropsInHost:host];
+        for (UIView *bg in self.cachedBackdrops) {
+            if ([self.hiddenBackdrops objectForKey:bg]) continue;
+            [self.hiddenBackdrops setObject:@(bg.alpha) forKey:bg];
+        }
+        KGLog(@"背景层扫描: 命中 %lu 层", (unsigned long)self.cachedBackdrops.count);
+    }
+
+    BOOL wantHide = [KGPrefs hideNativeBackdrop];
+    for (UIView *bg in self.cachedBackdrops) {
+        if (!bg.superview) continue;
+        NSNumber *origin = [self.hiddenBackdrops objectForKey:bg];
+        if (!origin) continue;
+        bg.alpha = wantHide ? 0.0 : origin.doubleValue;
+    }
 }
 
 - (void)applyStyleForMaterial:(KGMaterial)material {
@@ -444,39 +501,70 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 }
 
 - (void)writeInstallProbeWithHost:(UIView *)host material:(KGMaterial)material mode:(KGWorkMode)mode {
-    UIView *fg = (mode == KGWorkModeFull) ? [self topmostForegroundInHost:host] : nil;
+    UIView *fg = (mode == KGWorkModeFull) ? [self firstKeyLayerInHost:host] : nil;
     NSInteger gi = [host.layer.sublayers indexOfObject:self.glassLayer];
     NSInteger fi = fg ? [host.layer.sublayers indexOfObject:fg.layer] : NSNotFound;
-    UIView *bg = self.nativeBackdrop;
+    // 用缓存而不是重扫: 探针在 install 路径上, 不能因为它把 BFS 跑一遍
+    NSArray<UIView *> *backdrops = self.cachedBackdrops;
 
-    NSString *signature = [NSString stringWithFormat:@"%@|%@|%@|%ld|%ld|%ld",
+    // 把每一层背景的名字/尺寸/当前 alpha 都写出来 —— 下一次判断"主体为什么没变化"
+    // 全靠这一行, 不用再靠猜。
+    NSMutableString *bgDesc = [NSMutableString string];
+    for (UIView *bg in backdrops) {
+        NSNumber *origin = [self.hiddenBackdrops objectForKey:bg];
+        [bgDesc appendFormat:@"%@(%@,origin=%.2f,now=%.2f) ",
+            NSStringFromClass(bg.class), NSStringFromCGRect(bg.frame),
+            origin ? origin.doubleValue : -1.0, bg.alpha];
+    }
+    if (backdrops.count == 0) [bgDesc appendString:@"none"];
+
+    // 玻璃层正下方那三层是谁 —— 玻璃是 backdrop 层, 采样源就在它下面。
+    // 如果这三层里有东西仍然不透明, 玻璃就采不到键盘外面的画面。
+    NSMutableString *underDesc = [NSMutableString string];
+    NSArray<CALayer *> *subs = host.layer.sublayers;
+    if (gi != NSNotFound) {
+        for (NSInteger i = MAX((NSInteger)gi - 1, 0); i >= 0 && i >= gi - 3; i--) {
+            CALayer *l = subs[(NSUInteger)i];
+            [underDesc appendFormat:@"[%ld]%@ a=%.2f op=%.2f ",
+                (long)i, NSStringFromClass(l.class), l.hidden ? 0 : 1, l.opacity];
+        }
+    }
+    if (underDesc.length == 0) [underDesc appendString:@"none"];
+
+    NSString *signature = [NSString stringWithFormat:@"%@|%@|%lu|%ld|%ld|%ld",
         NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
-        bg ? NSStringFromClass(bg.class) : @"none", (long)gi, (long)fi, (long)mode];
+        (unsigned long)backdrops.count, (long)gi, (long)fi, (long)mode];
     if ([signature isEqualToString:self.lastProbeSignature]) return;
     self.lastProbeSignature = signature;
     if (self.probeCount++ > 60) return;
 
     KGWriteProbe([NSString stringWithFormat:
-        @"[install %@] mode=%ld host=%@ hostFrame=%@ onScreen=%d bg=%@ bgAlpha=%.2f fg=%@(layer %ld) glassLayerIdx=%ld/%lu hideNative=%d material=%ld blur=%.1f refraction=%.1f highlight=%.2f veil=%.2f radius=%.1f outline=%d\n",
+        @"[install %@] mode=%ld host=%@ hostFrame=%@ onScreen=%d glassLayerIdx=%ld/%lu fg=%@(layer %ld) hideNative=%d material=%ld blur=%.1f refraction=%.1f highlight=%.2f veil=%.2f radius=%.1f outline=%d\n"
+        @"         bgLayers(%lu)=%@\n"
+        @"         underGlass=%@\n",
         [NSDate date], (long)mode,
         NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
         KGIsOnScreen(host),
-        bg ? NSStringFromClass(bg.class) : @"none", self.nativeBackdropAlpha,
-        fg ? NSStringFromClass(fg.class) : @"none", (long)fi,
         (long)gi, (unsigned long)host.layer.sublayers.count,
+        fg ? NSStringFromClass(fg.class) : @"none", (long)fi,
         [KGPrefs hideNativeBackdrop], (long)material,
         self.appliedStyle.blur, self.appliedStyle.refraction,
         self.appliedStyle.highlight, self.appliedStyle.veil,
-        self.appliedStyle.cornerRadius, [KGPrefs showLayerOutline]]);
+        self.appliedStyle.cornerRadius, [KGPrefs showLayerOutline],
+        (unsigned long)backdrops.count, bgDesc, underDesc]);
 }
 
-- (void)restoreNativeBackdrop {
-    UIView *backdrop = self.nativeBackdrop;
-    if (backdrop && self.hasNativeBackdrop) {
-        backdrop.alpha = self.nativeBackdropAlpha;
+- (void)restoreNativeBackdrops {
+    if (!self.hiddenBackdrops) return;
+    // NSMapTable 弱键: 键盘视图被系统释放后 key 会自动变 nil, 这里顺着枚举恢复即可
+    for (UIView *bg in [[self.hiddenBackdrops keyEnumerator] allObjects]) {
+        NSNumber *origin = [self.hiddenBackdrops objectForKey:bg];
+        if (bg && origin) {
+            bg.alpha = origin.doubleValue;
+        }
     }
-    self.nativeBackdrop = nil;
-    self.hasNativeBackdrop = NO;
+    [self.hiddenBackdrops removeAllObjects];
+    self.cachedBackdrops = @[];
 }
 
 - (void)teardown {
@@ -485,7 +573,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         self.glassLayer = nil;
         self.hasAppliedStyle = NO;
     }
-    [self restoreNativeBackdrop];
+    [self restoreNativeBackdrops];
     self.hostView = nil;
 }
 
@@ -546,7 +634,7 @@ static NSArray<NSString *> *KGBackdropClassHints(void) {
     }
     self.glassLayer.frame = found.frame;
 
-    UIView *fg = [self topmostForegroundInHost:host];
+    UIView *fg = [self firstKeyLayerInHost:host];
     NSInteger target = 0;
     if (fg && fg != found) {
         NSInteger li = [host.layer.sublayers indexOfObject:fg.layer];
@@ -556,11 +644,8 @@ static NSArray<NSString *> *KGBackdropClassHints(void) {
     self.glassLayer.hidden = NO;
 
     self.hostView = host;
-    self.nativeBackdrop = found;
-    self.nativeBackdropAlpha = found.alpha;
-    self.hasNativeBackdrop = YES;
+    [self enforceNativeBackdropStateInHost:host];
 
-    [self enforceNativeBackdropState];
     [self applyStyleForMaterial:[KGPrefs material]];
 }
 
