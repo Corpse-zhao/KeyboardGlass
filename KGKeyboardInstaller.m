@@ -142,6 +142,19 @@ static BOOL KGIsUsableHost(UIView *view) {
 // 修法见下面 KGIsSafeToHide 的新判据: 改成「藏的不是按键的祖先就行」。
 static const NSUInteger kKGMaxContentDepth = 8;
 
+// 【v0.7.3】按键区底板的触摸安全下限。
+//
+// UIKBSplitImageView 这三张图既是观感上的「底板」(调淡它玻璃才能透上来),
+// 也是 iOS 键盘**接收点击的实体层** —— 命中判定落在它上面。
+// 2026-10-03 实测: 滑块拉满时只剩 15%, 结果「键盘能打字, 但键盘以外
+// 全点不动」—— 整个键盘窗口失去响应。
+//
+// 所以调淡有硬下限, 这个值不要再往下调。观感上仍有 45% 透明, 玻璃感明显。
+// 故意**不加 const**: 编译期常量折叠会把它从符号表里抹掉,
+// verify_deb.py 的断言就查不到「这版到底有没有设触摸下限」。
+// 运行期开销为零, 但能让这个安全下限在二进制里可被验证。
+static CGFloat kKGTouchSafeFloor = 0.55;
+
 static BOOL KGContainsKeyboardContent(UIView *view, NSUInteger depth) {
     if (!view || depth > kKGMaxContentDepth) return NO;
     for (UIView *sub in view.subviews) {
@@ -496,6 +509,8 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     // 的定时器在滚动/追踪期间是不触发的, 那正是最需要它工作的时候。
     [[NSRunLoop mainRunLoop] addTimer:self.workerTimer forMode:NSRunLoopCommonModes];
     KGLog(@"工作线程已启动: 间隔 0.4s, 稳定性闸 = 连续 2 次 frame 相同");
+    // 把触摸下限打进日志: 这是本版最关键的安全参数, 出问题时第一眼就要看到它。
+    KGLog(@"按键区底板触摸安全下限 = %.2f (底板 alpha 不会再低于这个值)", kKGTouchSafeFloor);
 }
 
 - (void)workerTick:(NSTimer *)timer {
@@ -1289,7 +1304,6 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     // 下限取 0.55: 观感上仍然明显透出玻璃(45% 透明), 但实体层足够撑住
     // 命中判定。这是从 v0.7.0 的 0.15 一步提到 0.55 的原因。
     CGFloat strength = [KGPrefs keyplaneDim];
-    const CGFloat kKGTouchSafeFloor = 0.55;   // 触摸安全下限, 不要再往下调
     for (UIView *kb in self.cachedKeyplaneBackdrops) {
         if (!kb.superview) continue;
         NSNumber *origin = [self.hiddenBackdrops objectForKey:kb];
