@@ -18,7 +18,16 @@ static NSString * const kKGCrashCountKey = @"CrashCount";
 static NSString * const kKGCrashLastKey  = @"CrashLastTime";
 static NSString * const kKGCircuitOpenKey = @"CircuitOpen";
 
-+ (void)noteHandledException:(NSException *)exception where:(NSString *)where {
+// 记一次异常并在到阈值时熔断。
+//
+// 为什么要持久化: 崩溃时进程内存里的东西全丢, 计数只存在局部变量里等于没记。
+// 写进 NSUserDefaults 才能跨进程累计 —— 而「反复重启 → 安全模式」本来就是
+// 跨进程的现象, 必须在进程之间记得住。
+//
+// 注意这三个必须实现成 **类方法** (下面的 + 号版本), 不能写成文件顶部的静态
+// C 函数 —— 那会落到 @implementation 之外, 报 "missing context for method
+// declaration" + "method definition not found"。
+static void KGRecordException(NSString *where, NSString *reason) {
     @try {
         NSUserDefaults *d = [KGPrefs defaults];
         NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
@@ -37,22 +46,14 @@ static NSString * const kKGCircuitOpenKey = @"CircuitOpen";
         [d synchronize];
 
         KGWriteProbe([NSString stringWithFormat:
-            @"[熔断] %@ 第 %ld 次异常: %@\n", where, (long)count, exception.reason]);
+            @"[熔断] %@ 第 %ld 次异常: %@\n", where, (long)count, reason]);
     } @catch (NSException *ignored) {
         // 熔断器自己绝不能成为崩溃源
     }
 }
 
-+ (BOOL)isCircuitOpen {
+static BOOL KGReadCircuitOpen(void) {
     return [[KGPrefs defaults] boolForKey:kKGCircuitOpenKey];
-}
-
-+ (void)resetCircuit {
-    NSUserDefaults *d = [KGPrefs defaults];
-    [d setInteger:0 forKey:kKGCrashCountKey];
-    [d setDouble:0 forKey:kKGCrashLastKey];
-    [d setBool:NO forKey:kKGCircuitOpenKey];
-    [d synchronize];
 }
 
 #pragma mark - 视图判定
@@ -265,6 +266,24 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 @end
 
 @implementation KGKeyboardInstaller
+
+#pragma mark - 崩溃熔断器 (类方法实现)
+
++ (void)noteHandledException:(NSException *)exception where:(NSString *)where {
+    KGRecordException(where, exception.reason);
+}
+
++ (BOOL)isCircuitOpen {
+    return KGReadCircuitOpen();
+}
+
++ (void)resetCircuit {
+    NSUserDefaults *d = [KGPrefs defaults];
+    [d setInteger:0 forKey:kKGCrashCountKey];
+    [d setDouble:0 forKey:kKGCrashLastKey];
+    [d setBool:NO forKey:kKGCircuitOpenKey];
+    [d synchronize];
+}
 
 + (instancetype)shared {
     static KGKeyboardInstaller *shared = nil;
