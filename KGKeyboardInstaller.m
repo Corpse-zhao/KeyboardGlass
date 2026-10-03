@@ -794,7 +794,7 @@ static UIView *KGKeyLayerIn(UIView *host) {
     // 收到探针先看这一行, 它决定了后面所有数据该怎么解释。
     KGWriteProbe([NSString stringWithFormat:
         @"[v1.1 %@] host=%@ frame=%@ key=%@\n"
-        @"   开关: %s  %s  %s  %s  %s  %s\n"
+        @"   开关: %@  %@  %@  %@  %@  %@\n"
         @"   veil=%@\n   bar=%@\n   keyBottom=%@\n   fullscreenWhite=%@\n"
         @"   glass=%@ 通透度=%.2f 底板=%.2f 材质=%ld\n",
         [NSDate date], NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
