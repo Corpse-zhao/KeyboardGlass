@@ -19,16 +19,24 @@ typedef struct KGStyle {
     BOOL    dark;          // 是否深色模式
 } KGStyle;
 
-// 工作模式 —— 二分隔离用的, 一次安装就能连测三档, 不用反复重装。
-// 用户反馈「键盘打不了字」, 但始终无法确定是「我们改视图树」还是「hook 本身 /
-// 与其它键盘插件冲突」造成的。所以把「我们到底做多少事」做成可调开关:
-//   Probe: 只 hook、只写探针, 一个节点都不碰 —— 最干净的比对基准
-//   Hide : 额外只做一件事: 把原生背景层 alpha 归零
-//   Full : 完整效果 (插玻璃层 + 隐藏背景)
+// 工作模式 —— 二分隔离用的, 一次安装就能连测几档, 不用反复重装。
+//
+// 【重要】默认必须是 KGWorkModeProbe —— 唯一一档被用户实测过「能打字」的。
+// 其余各档都在验证中: v0.3.0~0.4.0 期间, 我曾因为「玻璃层是纯 CALayer,
+// hitTest 只遍历 view, 所以不可能挡触摸」而把默认设成 Full。这个推理是错的:
+// 那句话从没被验证过 —— 用户当时能打字用的是 Probe/Hide 档, 而那两档
+// 根本不插玻璃层。v0.4.0 开了 Full 之后用户立刻反馈「又不能点击了」。
+// **「机制上不可能」不等于「实测不会」, 别拿推理当实测。**
+//
+//   Probe: 只 hook、只写探针, 一个节点都不碰 —— 唯一验证过安全的基准档
+//   Hide : 额外只做一件事: 把某**一**层原生背景 alpha 归零
+//   Glass: 插玻璃层, 但**完全不碰原生背景** ← 隔离「玻璃层本身是否挡触摸」
+//   Full : 玻璃层 + 藏背景 (Hide 与 Glass 的组合)
 typedef NS_ENUM(NSInteger, KGWorkMode) {
     KGWorkModeProbe = 0,   // 纯探针: 完全不碰视图树
-    KGWorkModeHide  = 1,   // 只隐藏原生背景层
-    KGWorkModeFull  = 2,   // 完整: 插入玻璃层
+    KGWorkModeHide  = 1,   // 只隐藏一层原生背景
+    KGWorkModeGlass = 2,   // 只插玻璃层, 不动原生背景
+    KGWorkModeFull  = 3,   // 完整: 玻璃层 + 藏背景
 };
 
 extern NSString * const KGPrefsSuiteName;

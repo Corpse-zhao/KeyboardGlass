@@ -41,7 +41,7 @@
 			<key>key</key>
 			<string>WorkMode</string>
 			<key>default</key>
-			<integer>2</integer>
+			<integer>0</integer>
 			<key>defaults</key>
 			<string>com.banli.keyboardglass.preferences</string>
 			<key>detail</key>
@@ -49,14 +49,16 @@
 			<key>validTitles</key>
 			<array>
 				<string>① 纯探针（什么都不改）</string>
-				<string>② 只隐藏原生背景</string>
-				<string>③ 完整·插入玻璃层（推荐）</string>
+				<string>② 只隐藏一层原生背景</string>
+				<string>③ 只插玻璃层</string>
+				<string>④ 玻璃层 + 藏背景</string>
 			</array>
 			<key>validValues</key>
 			<array>
 				<integer>0</integer>
 				<integer>1</integer>
 				<integer>2</integer>
+				<integer>3</integer>
 			</array>
 			<key>get</key>
 			<string>readPreferenceValue:</string>
@@ -68,7 +70,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>排查用。默认「③ 完整」：玻璃层是纯图层而不是视图，不参与触摸命中，正常不会挡住打字。只有怀疑插件本身导致问题时才降到 ①——①都打不了字就说明问题不在玻璃效果。改完切一次键盘即可生效。</string>
+			<string>默认「① 纯探针」，这是唯一确认过不影响打字的一档。往上试的时候一次只加一档：③ 只插玻璃层、不碰原生背景，用来判断玻璃层本身会不会挡住触摸；② 只藏背景不插玻璃层。确认安全之后再用④。改完切一次键盘即可生效。</string>
 		</dict>
 
 		<dict>
@@ -356,7 +358,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>板栗仁 · KeyboardGlass 0.4.0</string>
+			<string>板栗仁 · KeyboardGlass 0.4.1</string>
 		</dict>
 
 	</array>

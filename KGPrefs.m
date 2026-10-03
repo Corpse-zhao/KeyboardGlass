@@ -20,8 +20,9 @@ static const CGFloat kKGDefaultVeil         = 0.42;
 static const CGFloat kKGDefaultCornerRadius = 0.0;
 
 // 参数版本号。1 = 早期那组不可见的默认值; 2 = 液态玻璃推荐值;
-// 3 = 二分隔离结束, 工作模式默认切到「完整」。
-static const NSInteger kKGParamsVersion = 3;
+// 3 = 二分隔离结束, 工作模式默认切到「完整」;
+// 4 = v0.4.0 批量藏背景导致键盘哑掉, 默认退回「纯探针」(用户实测能打字的那档)。
+static const NSInteger kKGParamsVersion = 4;
 
 static BOOL kKGDebugEnabled = NO;
 
@@ -59,9 +60,9 @@ void KGLog(NSString *format, ...) {
         @"HideNativeBackdrop": @YES,
         @"DebugLog":           @NO,
         @"ShowLayerOutline":   @NO,
-        // 默认「完整」: v0.4.0 起玻璃层是纯 CALayer, 不可能挡触摸;
-        // 二分隔离阶段为了定位问题才默认停在探针档, 现在不需要了。
-        @"WorkMode":           @(KGWorkModeFull),
+        // 默认「纯探针」: 唯一一档被用户实测过「能打字」的。
+        // 完整档会插玻璃层 + 藏原生背景, 这两件事都还在验证中, 不能默认开。
+        @"WorkMode":           @(KGWorkModeProbe),
     }];
     kKGDebugEnabled = [[self defaults] boolForKey:@"DebugLog"];
     [self runParamsMigrationIfNeeded];
@@ -83,11 +84,15 @@ void KGLog(NSString *format, ...) {
     [d setObject:@(kKGDefaultVeil)       forKey:@"LiquidVeil"];
     [d setObject:@(kKGDefaultCornerRadius) forKey:@"CornerRadius"];
     [d setObject:@YES                    forKey:@"HideNativeBackdrop"];
-    // v0.4.0: 二分隔离已经完成使命 (用户确认「现在可以打字了」), 触摸问题定位在
-    // 往键盘里插 UIView, 而玻璃层早已改成纯 CALayer, 机制上不可能挡触摸。
-    // 所以这里把工作模式一并推到「完整」。用户要是又手动调回低档, 后续
-    // 版本号已经到 3, 不会再被覆盖。
-    [d setObject:@(KGWorkModeFull)        forKey:@"WorkMode"];
+    // v0.4.1: 退回「纯探针」。
+    //
+    // v0.3.0 我把默认设成 Full, 理由是「玻璃层是纯 CALayer, 不可能挡触摸」——
+    // 这个理由是错的, 而且从没被验证过: 用户说「能打字」时用的是 Probe/Hide 档,
+    // 那两档根本不插玻璃层。v0.4.0 上了 Full 档后用户立刻反馈「又不能点击了」。
+    //
+    // 教训: 「机制上不可能」不等于「实测不会」。默认档必须是**用户亲自验证过
+    // 能打字**的那一档, 把完整档留给用户按需开启, 不能替他冒这个险。
+    [d setObject:@(KGWorkModeProbe)        forKey:@"WorkMode"];
     [d synchronize];
 }
 
@@ -181,9 +186,9 @@ void KGLog(NSString *format, ...) {
 
 + (KGWorkMode)workMode {
     NSUserDefaults *d = [self defaults];
-    if ([d objectForKey:@"WorkMode"] == nil) return KGWorkModeFull;
+    if ([d objectForKey:@"WorkMode"] == nil) return KGWorkModeProbe;
     NSInteger raw = [d integerForKey:@"WorkMode"];
-    if (raw < KGWorkModeProbe || raw > KGWorkModeFull) return KGWorkModeFull;
+    if (raw < KGWorkModeProbe || raw > KGWorkModeFull) return KGWorkModeProbe;
     return (KGWorkMode)raw;
 }
 

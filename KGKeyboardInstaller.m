@@ -83,9 +83,18 @@ static BOOL KGLooksLikeKeyboardForeground(UIView *view) {
 //   「顶部透明了, 主体没变化」: 顶部那块被藏了, 主体那块 (白 0.10) 还压在
 //   玻璃层下面, 玻璃层采到的就是它自己 —— 白上加白, 等于什么都没发生。
 //
-// 所以改成**递归 BFS**: 名字带 Backdrop、子树里没有按键内容、宽度接近整屏
-// 的一律收进来。命中一个就不再往它子树里下钻 (藏外层自然连带藏内层,
-// 记录与恢复都只需一条, 不会因为父子都命中而把状态搞乱)。
+// KG_TOUCH_LESSON (v0.4.1 血泪, 优先级高于上面那条):
+//   v0.4.0 把「藏背景」从 1 层扩到「所有整宽的 Backdrop 层」, 结果用户立刻
+//   反馈「又不能点击了」。原因: alpha=0 会让整棵子树退出 hitTest ——
+//   「子树里没有按键内容」只能保证按键本身还在, **不能保证这层不参与
+//   触摸派发**。iOS 键盘的触摸走自己的窗口路由, 藏掉哪一层会哑, 光靠静态
+//   判据推不出来, 只能实测。
+//   所以铁律改成: **一次只藏一层, 而且必须是可以一键回滚的单层。**
+//   「主体没变化」的观感问题, 靠调整这一层的插入 z 序来解决(让玻璃层压住
+//   它), 而不是靠把更多层一起藏掉。
+//
+// 判据保留面积门槛 (排除按键内部自带的小 backdrop) + 无按键内容 (防止按键
+// 自己消失), 但**不再批量隐藏**。
 static BOOL KGIsSafeToHide(UIView *view) {
     NSString *name = NSStringFromClass(view.class);
     if (![name containsString:@"Backdrop"]) return NO;
@@ -107,6 +116,17 @@ static BOOL KGStyleEqual(KGStyle a, KGStyle b) {
         && a.veil == b.veil
         && a.cornerRadius == b.cornerRadius
         && a.dark == b.dark;
+}
+
+// 各档位「做哪几件事」的开关。把判断收在这里, 而不是散在主流程里 ——
+// v0.4.1 加 Glass 档时, 因为散着写漏改了枚举, 差点又把「藏背景」带上。
+// v0.4.1 起两个动作**完全解耦**, 就能单独验证「玻璃层本身是否挡触摸」。
+static BOOL KGModeShowsGlass(KGWorkMode mode) {
+    return mode == KGWorkModeGlass || mode == KGWorkModeFull;
+}
+
+static BOOL KGModeHidesBackdrop(KGWorkMode mode) {
+    return mode == KGWorkModeHide || mode == KGWorkModeFull;
 }
 
 #pragma mark - 探针
@@ -180,7 +200,8 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 // 值 = 它的原始 alpha (恢复用)
 // v0.4.0 起是「一组」而不是「一个」—— 见 KG_BACKDROP_SCAN_NOTE。
 @property (nonatomic, strong) NSMapTable<UIView *, NSNumber *> *hiddenBackdrops;
-@property (nonatomic, strong) NSArray<UIView *> *cachedBackdrops;  // 扫描结果缓存
+// v0.4.1: 锁定的**唯一**一层背景 (批量隐藏会让键盘哑掉, 见 KG_TOUCH_LESSON)
+@property (nonatomic, weak)   UIView *cachedBackdrop;
 @property (nonatomic, assign) BOOL hasAppliedStyle;
 @property (nonatomic, assign) KGStyle appliedStyle;
 @property (nonatomic, assign) BOOL didDumpStableTree;
@@ -261,20 +282,23 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         [self scheduleStableTreeDump:host];
     }
 
-    // 从「完整」切到更低档时, 必须把已经插进去的玻璃层撤掉 + 恢复原生背景
-    if (mode != KGWorkModeFull && self.glassLayer.superlayer) {
+    // 从「插玻璃层」切到更低的档时, 必须把已经插进去的玻璃层撤掉
+    if (!KGModeShowsGlass(mode) && self.glassLayer.superlayer) {
         KGLog(@"工作模式降到 %ld, 撤掉已插入的玻璃层", (long)mode);
         [self.glassLayer removeFromSuperlayer];
+    }
+    // 从「藏背景」切到更低档时, 必须恢复原生背景
+    if (!KGModeHidesBackdrop(mode)) {
         [self restoreNativeBackdrops];
     }
 
-    if (mode == KGWorkModeFull) {
+    if (KGModeShowsGlass(mode)) {
         [self placeGlassInHost:host];
         self.glassLayer.hidden = NO;
         [self applyStyleForMaterial:material];
     }
 
-    if (mode != KGWorkModeProbe) {
+    if (KGModeHidesBackdrop(mode)) {
         [self enforceNativeBackdropStateInHost:host];
     }
 
@@ -385,12 +409,21 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     return nil;
 }
 
-// 递归找出宿主里所有可以安全隐藏的原生背景层。
-// BFS + 命中即止: 找到一个就不再往它子树里钻 —— 藏外层自然连带藏内层,
-// 避免父子都命中导致记录/恢复状态错乱。
-- (NSArray<UIView *> *)backdropsInHost:(UIView *)host {
-    NSMutableArray<UIView *> *found = [NSMutableArray array];
-    if (!host) return found;
+// 找出宿主里**唯一一层**可以隐藏的原生背景。
+//
+// v0.4.1 关键改动: 从「收集全部」改成「只挑一层」。
+// v0.4.0 批量隐藏导致键盘哑掉 —— alpha=0 会让整棵子树退出 hitTest,
+// 「子树里无按键内容」只能保证按键还在, 保证不了这层不参与触摸派发。
+// 一次只动一层, 哑了也只有一层可回滚, 不会再出现「不知道是哪层害的」。
+//
+// 挑选规则: 递归 BFS 找到**面积最大**的那一层 (主体背景永远比 45pt 助手条大),
+// 这样正好解决 v0.4.0 之前的「只藏到助手条、主体没变化」问题 ——
+// 主体背景藏了, 玻璃层下方才第一次真正透出 App 内容。
+- (UIView *)backdropInHost:(UIView *)host {
+    if (!host) return nil;
+
+    UIView *best = nil;
+    CGFloat bestArea = 0;
 
     NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:host];
     NSUInteger guard = 0;
@@ -400,12 +433,18 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         if (!current) continue;
 
         if (current != host && KGIsSafeToHide(current)) {
-            [found addObject:current];
+            CGFloat area = current.frame.size.width * current.frame.size.height;
+            if (area > bestArea) {
+                bestArea = area;
+                best = current;
+            }
+            // 命中即止: 不再往这层子树里钻。藏外层自然连带藏内层,
+            // 避免父子都被记进状态里搞乱恢复逻辑。
             continue;
         }
         [queue addObjectsFromArray:current.subviews];
     }
-    return found;
+    return best;
 }
 
 #pragma mark - 安装与拆卸
@@ -451,39 +490,42 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     }
 }
 
-// 隐藏 / 恢复原生背景层。v0.4.0: 递归收集全宿主, 不再只挑一个。
+// 隐藏 / 恢复原生背景层。
 //
-// 性能: backdropsInHost: 是一次全子树 BFS (上限 4000 节点), 而 layoutSubviews
-// 在键盘动画期间每秒能走几十次。所以扫出来的结果缓存下来复用, 只在
-// 「没扫过」或「缓存里的视图已经离树」时重扫 —— 重扫后仍然是一次 BFS,
-// 但平时只是给几个视图重新赋 alpha, 可以忽略。
+// v0.4.1: 目标恒为**一层**。扫描一次就锁定, 之后只重新应用 alpha。
+// 不在每次布局时重扫 —— 重扫有可能选中另一层 (键盘动画中子树结构会变),
+// 「藏 A 层 → 触发重排 → 选中 B 层 → 藏 B 层 → …」这种链会把键盘搞死。
+//
+// 性能: backdropInHost: 是全子树 BFS (上限 4000 节点), 而 layoutSubviews 在
+// 键盘动画期间每秒能走几十次, 绝对不能每次都跑。
 - (void)enforceNativeBackdropStateInHost:(UIView *)host {
     if (!self.hiddenBackdrops) {
         self.hiddenBackdrops = [NSMapTable weakToStrongObjectsMapTable];
     }
 
-    BOOL needScan = (self.cachedBackdrops.count == 0);
-    if (!needScan) {
-        for (UIView *bg in self.cachedBackdrops) {
-            if (!bg || !bg.superview) { needScan = YES; break; }
+    // 锁定的层离树了才重选 —— 键盘重建时会换一批视图
+    if (!self.cachedBackdrop || !self.cachedBackdrop.superview) {
+        self.cachedBackdrop = [self backdropInHost:host];
+        if (self.cachedBackdrop) {
+            [self.hiddenBackdrops setObject:@(self.cachedBackdrop.alpha)
+                                     forKey:self.cachedBackdrop];
+            KGLog(@"锁定背景层 %@ frame=%@",
+                  NSStringFromClass(self.cachedBackdrop.class),
+                  NSStringFromCGRect(self.cachedBackdrop.frame));
+        } else {
+            KGLog(@"没找到可隐藏的背景层");
         }
-    }
-    if (needScan) {
-        self.cachedBackdrops = [self backdropsInHost:host];
-        for (UIView *bg in self.cachedBackdrops) {
-            if (!bg) continue;
-            if ([self.hiddenBackdrops objectForKey:bg]) continue;
-            [self.hiddenBackdrops setObject:@(bg.alpha) forKey:bg];
-        }
-        KGLog(@"背景层扫描: 命中 %lu 层", (unsigned long)self.cachedBackdrops.count);
     }
 
-    BOOL wantHide = [KGPrefs hideNativeBackdrop];
-    for (UIView *bg in self.cachedBackdrops) {
-        if (!bg || !bg.superview) continue;
-        NSNumber *origin = [self.hiddenBackdrops objectForKey:bg];
-        if (!origin) continue;
-        bg.alpha = wantHide ? 0.0 : origin.doubleValue;
+    UIView *bg = self.cachedBackdrop;
+    if (!bg || !bg.superview) return;
+    NSNumber *origin = [self.hiddenBackdrops objectForKey:bg];
+    if (!origin) return;
+
+    CGFloat target = [KGPrefs hideNativeBackdrop] ? 0.0 : origin.doubleValue;
+    // 只在真的需要改时才写。alpha 赋值会触发重排, 无脑写等于自激。
+    if (fabs(bg.alpha - target) > 0.001) {
+        bg.alpha = target;
     }
 }
 
@@ -503,23 +545,17 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 }
 
 - (void)writeInstallProbeWithHost:(UIView *)host material:(KGMaterial)material mode:(KGWorkMode)mode {
-    UIView *fg = (mode == KGWorkModeFull) ? [self firstKeyLayerInHost:host] : nil;
+    UIView *fg = KGModeShowsGlass(mode) ? [self firstKeyLayerInHost:host] : nil;
     NSInteger gi = self.glassLayer ? [host.layer.sublayers indexOfObject:self.glassLayer] : NSNotFound;
     NSInteger fi = fg ? [host.layer.sublayers indexOfObject:fg.layer] : NSNotFound;
-    // 用缓存而不是重扫: 探针在 install 路径上, 不能因为它把 BFS 跑一遍
-    NSArray<UIView *> *backdrops = self.cachedBackdrops;
-
-    // 把每一层背景的名字/尺寸/当前 alpha 都写出来 —— 下一次判断"主体为什么没变化"
-    // 全靠这一行, 不用再靠猜。
-    NSMutableString *bgDesc = [NSMutableString string];
-    for (UIView *bg in backdrops) {
-        if (!bg) continue;
-        NSNumber *origin = [self.hiddenBackdrops objectForKey:bg];
-        [bgDesc appendFormat:@"%@(%@,origin=%.2f,now=%.2f) ",
-            NSStringFromClass(bg.class), NSStringFromCGRect(bg.frame),
-            origin ? origin.doubleValue : -1.0, bg.alpha];
-    }
-    if (backdrops.count == 0) [bgDesc appendString:@"none"];
+    // 被锁定的那一层背景 (v0.4.1 起恒为单层)
+    UIView *bg = self.cachedBackdrop;
+    NSNumber *bgOrigin = bg ? [self.hiddenBackdrops objectForKey:bg] : nil;
+    NSString *bgDesc = bg
+        ? [NSString stringWithFormat:@"%@(%@,origin=%.2f,now=%.2f)",
+           NSStringFromClass(bg.class), NSStringFromCGRect(bg.frame),
+           bgOrigin ? bgOrigin.doubleValue : -1.0, bg.alpha]
+        : @"none";
 
     // 玻璃层正下方那三层是谁 —— 玻璃是 backdrop 层, 采样源就在它下面。
     // 如果这三层里有东西仍然不透明, 玻璃就采不到键盘外面的画面。
@@ -534,16 +570,16 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     }
     if (underDesc.length == 0) [underDesc appendString:@"none"];
 
-    NSString *signature = [NSString stringWithFormat:@"%@|%@|%lu|%ld|%ld|%ld",
+    NSString *signature = [NSString stringWithFormat:@"%@|%@|%@|%ld|%ld|%ld",
         NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
-        (unsigned long)backdrops.count, (long)gi, (long)fi, (long)mode];
+        bg ? NSStringFromClass(bg.class) : @"none", (long)gi, (long)fi, (long)mode];
     if ([signature isEqualToString:self.lastProbeSignature]) return;
     self.lastProbeSignature = signature;
     if (self.probeCount++ > 60) return;
 
     KGWriteProbe([NSString stringWithFormat:
         @"[install %@] mode=%ld host=%@ hostFrame=%@ onScreen=%d glassLayerIdx=%ld/%lu fg=%@(layer %ld) hideNative=%d material=%ld blur=%.1f refraction=%.1f highlight=%.2f veil=%.2f radius=%.1f outline=%d\n"
-        @"         bgLayers(%lu)=%@\n"
+        @"         hiddenBg=%@\n"
         @"         underGlass=%@\n",
         [NSDate date], (long)mode,
         NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
@@ -554,7 +590,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         self.appliedStyle.blur, self.appliedStyle.refraction,
         self.appliedStyle.highlight, self.appliedStyle.veil,
         self.appliedStyle.cornerRadius, [KGPrefs showLayerOutline],
-        (unsigned long)backdrops.count, bgDesc, underDesc]);
+        bgDesc, underDesc]);
 }
 
 - (void)restoreNativeBackdrops {
@@ -567,7 +603,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         if (origin) bg.alpha = origin.doubleValue;
     }
     [self.hiddenBackdrops removeAllObjects];
-    self.cachedBackdrops = @[];
+    self.cachedBackdrop = nil;
 }
 
 - (void)teardown {
@@ -620,7 +656,7 @@ static NSArray<NSString *> *KGBackdropClassHints(void) {
 }
 
 - (void)legacyRefreshWithRoot:(UIView *)root {
-    if ([KGPrefs workMode] != KGWorkModeFull) return;   // 只有「完整」档才动视图
+    if (!KGModeShowsGlass([KGPrefs workMode])) return;   // 只有「插玻璃层」的档位才动视图
     if (self.glassLayer.superlayer != nil) return;       // 已经装好了, 别乱动
 
     UIView *found = [self findBackdropByNameIn:root];
