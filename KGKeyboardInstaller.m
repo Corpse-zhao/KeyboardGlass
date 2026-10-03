@@ -444,6 +444,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     if (!fg) return;
     NSInteger gi = [hostLayer.sublayers indexOfObject:self.glassLayer];
     NSInteger fi = [hostLayer.sublayers indexOfObject:fg.layer];
+    // gi 必然有效 (superlayer 就是 hostLayer), 保险起见还是判一下
     if (gi != NSNotFound && fi != NSNotFound && gi > fi) {
         KGLog(@"玻璃层被压到按键上面 (layer idx %ld > %ld), 纠正一次", (long)gi, (long)fi);
         [hostLayer insertSublayer:self.glassLayer atIndex:(NSUInteger)fi];
@@ -464,12 +465,13 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     BOOL needScan = (self.cachedBackdrops.count == 0);
     if (!needScan) {
         for (UIView *bg in self.cachedBackdrops) {
-            if (!bg.superview) { needScan = YES; break; }
+            if (!bg || !bg.superview) { needScan = YES; break; }
         }
     }
     if (needScan) {
         self.cachedBackdrops = [self backdropsInHost:host];
         for (UIView *bg in self.cachedBackdrops) {
+            if (!bg) continue;
             if ([self.hiddenBackdrops objectForKey:bg]) continue;
             [self.hiddenBackdrops setObject:@(bg.alpha) forKey:bg];
         }
@@ -478,7 +480,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 
     BOOL wantHide = [KGPrefs hideNativeBackdrop];
     for (UIView *bg in self.cachedBackdrops) {
-        if (!bg.superview) continue;
+        if (!bg || !bg.superview) continue;
         NSNumber *origin = [self.hiddenBackdrops objectForKey:bg];
         if (!origin) continue;
         bg.alpha = wantHide ? 0.0 : origin.doubleValue;
@@ -502,7 +504,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 
 - (void)writeInstallProbeWithHost:(UIView *)host material:(KGMaterial)material mode:(KGWorkMode)mode {
     UIView *fg = (mode == KGWorkModeFull) ? [self firstKeyLayerInHost:host] : nil;
-    NSInteger gi = [host.layer.sublayers indexOfObject:self.glassLayer];
+    NSInteger gi = self.glassLayer ? [host.layer.sublayers indexOfObject:self.glassLayer] : NSNotFound;
     NSInteger fi = fg ? [host.layer.sublayers indexOfObject:fg.layer] : NSNotFound;
     // 用缓存而不是重扫: 探针在 install 路径上, 不能因为它把 BFS 跑一遍
     NSArray<UIView *> *backdrops = self.cachedBackdrops;
@@ -511,6 +513,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     // 全靠这一行, 不用再靠猜。
     NSMutableString *bgDesc = [NSMutableString string];
     for (UIView *bg in backdrops) {
+        if (!bg) continue;
         NSNumber *origin = [self.hiddenBackdrops objectForKey:bg];
         [bgDesc appendFormat:@"%@(%@,origin=%.2f,now=%.2f) ",
             NSStringFromClass(bg.class), NSStringFromCGRect(bg.frame),
@@ -522,11 +525,11 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     // 如果这三层里有东西仍然不透明, 玻璃就采不到键盘外面的画面。
     NSMutableString *underDesc = [NSMutableString string];
     NSArray<CALayer *> *subs = host.layer.sublayers;
-    if (gi != NSNotFound) {
-        for (NSInteger i = MAX((NSInteger)gi - 1, 0); i >= 0 && i >= gi - 3; i--) {
+    if (gi > 0) {
+        for (NSInteger i = gi - 1; i >= 0 && i >= gi - 3; i--) {
             CALayer *l = subs[(NSUInteger)i];
-            [underDesc appendFormat:@"[%ld]%@ a=%.2f op=%.2f ",
-                (long)i, NSStringFromClass(l.class), l.hidden ? 0 : 1, l.opacity];
+            [underDesc appendFormat:@"[%ld]%@ hidden=%d opacity=%.2f ",
+                (long)i, NSStringFromClass(l.class), l.hidden ? 1 : 0, l.opacity];
         }
     }
     if (underDesc.length == 0) [underDesc appendString:@"none"];
@@ -556,12 +559,12 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 
 - (void)restoreNativeBackdrops {
     if (!self.hiddenBackdrops) return;
-    // NSMapTable 弱键: 键盘视图被系统释放后 key 会自动变 nil, 这里顺着枚举恢复即可
+    // NSMapTable 弱键: 键盘视图被系统释放后 key 会自动变 nil。必须先判空再用
+    // objectForKey: —— 给 nil 当 key 查会抛异常。
     for (UIView *bg in [[self.hiddenBackdrops keyEnumerator] allObjects]) {
+        if (!bg) continue;
         NSNumber *origin = [self.hiddenBackdrops objectForKey:bg];
-        if (bg && origin) {
-            bg.alpha = origin.doubleValue;
-        }
+        if (origin) bg.alpha = origin.doubleValue;
     }
     [self.hiddenBackdrops removeAllObjects];
     self.cachedBackdrops = @[];
