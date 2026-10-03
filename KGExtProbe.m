@@ -44,33 +44,44 @@ static void KGExtWrite(NSString *content) {
     NSString *sandbox =
         [[NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject]
             stringByAppendingPathComponent:@"kg_ext_probe.txt"];
+    // ------------------------------------------------------------------
+    // 【为什么这里不用 @try】v2.0.0 第一次构建就是挂在这一行:
+    //     KGExtProbe.m:48:9: error: @try statement without a @catch and @finally
+    //     KGExtProbe.m:72:11: error: call to undeclared function 'catch'
+    // Logos 的预处理器把 `@catch` 当成自己的 `@c` 指令吃掉了, 吐出裸的
+    // `catch (NSException *e) {` —— C++ 语法在 .m 文件里当然编译不过。
+    //
+    // 与其斗智斗勇绕开 Logos, 干脆**不用异常处理**: 下面每一步都用
+    // 返回值判断, 任何一步失败就直接跳到下一个路径。NSFileManager 的
+    // 方法在路径不可写时返回 NO + 填充 error, 不会抛异常, 所以
+    // 「返回值判断」已经足够, @try 属于多余。
+    // ------------------------------------------------------------------
     for (NSString *path in @[kKGExtProbeFile, sandbox]) {
-        @try {
-            NSFileManager *fm = NSFileManager.defaultManager;
-            if (![fm fileExistsAtPath:path]) {
-                [fm createDirectoryAtPath:[path stringByDeletingLastPathComponent]
-               withIntermediateDirectories:YES
-                                attributes:nil
-                                     error:NULL];
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSString *dir = [path stringByDeletingLastPathComponent];
+        if (![fm fileExistsAtPath:path] && ![fm fileExistsAtPath:dir]) {
+            if (![fm createDirectoryAtPath:dir
+                withIntermediateDirectories:YES
+                                 attributes:nil
+                                      error:NULL]) {
+                continue;   // 建不了目录(沙盒受限), 试下一个路径
             }
-            // 写太快会让文件长到几百 MB(十三版实测 253MB, 根本没法看)。
-            // 每次 dump 之前先查体积, 超过 512KB 就先清空再写。
-            NSDictionary *attr = [fm attributesOfItemAtPath:path error:NULL];
-            unsigned long long sz = [attr fileSize];
-            if (sz > 512 * 1024) {
-                [data writeToFile:path atomically:YES];
+        }
+        // 写太快会让文件长到几百 MB(十三版实测 253MB, 根本没法看)。
+        // 每次 dump 之前先查体积, 超过 512KB 就先清空再写。
+        unsigned long long sz =
+            [[fm attributesOfItemAtPath:path error:NULL] fileSize];
+        if (sz > 512 * 1024) {
+            if (![data writeToFile:path atomically:YES]) continue;
+        } else {
+            NSFileHandle *h = [NSFileHandle fileHandleForUpdatingAtPath:path];
+            if (h) {
+                [h seekToEndOfFile];
+                [h writeData:data];
+                [h closeFile];
             } else {
-                NSFileHandle *h = [NSFileHandle fileHandleForUpdatingAtPath:path];
-                if (h) {
-                    [h seekToEndOfFile];
-                    [h writeData:data];
-                    [h closeFile];
-                } else {
-                    [data writeToFile:path atomically:YES];
-                }
+                if (![data writeToFile:path atomically:YES]) continue;
             }
-        } catch (NSException *e) {
-            // 写不了就算了, 绝不能因为探针把输入法搞崩
         }
     }
 }
