@@ -518,6 +518,20 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 
 // 把玻璃层挂到宿主的 layer 上 (不是 subview!)。
 // hitTest 只遍历 view, 所以挂在 layer 上的玻璃层**永远不可能**挡住触摸。
+//
+// 【v0.4.2 新增】玻璃层插在哪一层, 决定了「哪里变透明」。
+//
+// v0.4.1 之前玻璃层一律插在按键层**之下** (= 所有背景之上、所有按键之下),
+// 于是只有按键之间的缝隙透出玻璃, 按键区自己的那层不透明底色仍然压在
+// 玻璃上方 —— 用户反馈精准描述为「背景透明了, 就是按键没透明」。
+// 那层底色 (UIKBKeyplaneView 自带的 backdrop) 不属于我们藏的那一类
+// (它不是整屏宽, 也可能自带按键内容), 所以藏背景永远藏不到它。
+//
+// 现在把 z 序做成两档, 由设置项 GlassOverKeys 控制:
+//   NO  (默认) = 插在按键之下 -> 只有键缝透出玻璃, 按键区保持原样, 稳
+//   YES         = 插在按键之上 -> 整块键盘(含按键区)都变玻璃, 就是 iOS 26 那个观感
+// 代价: 玻璃会盖在按键上。视觉上正确, 但**必须实测还能不能打字** ——
+// 这正是 v0.4.0 翻车的原因, 所以默认关、由用户主动开。
 - (void)placeGlassInHost:(UIView *)host {
     if (!self.glassLayer) {
         self.glassLayer = [[KGGlassLayer alloc] init];
@@ -529,31 +543,38 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     }
 
     CALayer *hostLayer = host.layer;
+    BOOL overKeys = [KGPrefs glassOverKeys];
+    UIView *fg = [self firstKeyLayerInHost:host];
+
+    // 目标下标。overKeys=YES 时插到最上层 (= 按键之上)。
+    NSInteger target = 0;
+    if (overKeys) {
+        target = (NSInteger)hostLayer.sublayers.count;
+    } else if (fg) {
+        NSInteger li = [hostLayer.sublayers indexOfObject:fg.layer];
+        if (li != NSNotFound) target = li;
+    }
+    // 下标越界会让 insertSublayer:atIndex: 直接抛异常, 必须在范围内夹一下
+    if (target < 0) target = 0;
+    if (target > (NSInteger)hostLayer.sublayers.count) target = (NSInteger)hostLayer.sublayers.count;
 
     if (self.glassLayer.superlayer != hostLayer) {
-        // 首次进场: 插到「第一个按键层」的下面 —— 即所有背景之上、所有按键之下
-        UIView *fg = [self firstKeyLayerInHost:host];
-        NSInteger target = 0;
-        if (fg) {
-            NSInteger li = [hostLayer.sublayers indexOfObject:fg.layer];
-            if (li != NSNotFound) target = li;
-        }
-        [hostLayer insertSublayer:self.glassLayer atIndex:(NSUInteger)MAX(0, target)];
-        KGLog(@"玻璃层入位: host=%@ sublayers=%lu 目标位置=%ld (前景=%@)",
-              NSStringFromClass(host.class), (unsigned long)hostLayer.sublayers.count,
+        [hostLayer insertSublayer:self.glassLayer atIndex:(NSUInteger)target];
+        KGLog(@"玻璃层入位: overKeys=%d host=%@ sublayers=%lu 目标位置=%ld (按键层=%@)",
+              overKeys ? 1 : 0, NSStringFromClass(host.class),
+              (unsigned long)hostLayer.sublayers.count,
               (long)target, fg ? NSStringFromClass(fg.class) : @"none");
         return;
     }
 
-    // 已在宿主里: 平时绝不动它 (避免触发布局), 只在压到按键上面时纠正一次
-    UIView *fg = [self firstKeyLayerInHost:host];
-    if (!fg) return;
+    // 已在宿主里: 平时绝不动它 (避免触发布局), 只在 z 序与目标不符时纠正。
+    // 这里必须**每次都校正**而不是「纠正一次」—— 因为用户随时可能切这个开关,
+    // 而键盘重建后 sublayers 数量也会变, 一次性纠正会被这些变化打失效。
     NSInteger gi = [hostLayer.sublayers indexOfObject:self.glassLayer];
-    NSInteger fi = [hostLayer.sublayers indexOfObject:fg.layer];
-    // gi 必然有效 (superlayer 就是 hostLayer), 保险起见还是判一下
-    if (gi != NSNotFound && fi != NSNotFound && gi > fi) {
-        KGLog(@"玻璃层被压到按键上面 (layer idx %ld > %ld), 纠正一次", (long)gi, (long)fi);
-        [hostLayer insertSublayer:self.glassLayer atIndex:(NSUInteger)fi];
+    if (gi == NSNotFound) return;
+    if (gi != target) {
+        KGLog(@"玻璃层 z 序需纠正: %ld -> %ld (overKeys=%d)", (long)gi, (long)target, overKeys ? 1 : 0);
+        [hostLayer insertSublayer:self.glassLayer atIndex:(NSUInteger)target];
     }
 }
 

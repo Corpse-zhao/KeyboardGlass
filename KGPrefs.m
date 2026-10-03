@@ -196,6 +196,12 @@ void KGLog(NSString *format, ...) {
     return [[self defaults] boolForKey:@"ShowLayerOutline"];
 }
 
++ (BOOL)glassOverKeys {
+    // 默认 NO: 玻璃压在按键上会遮挡按键, 能不能打字从未实测验证过。
+    // 沿用「拿不准就退到已验证的那一侧」这条铁律。
+    return [[self defaults] boolForKey:@"GlassOverKeys"];
+}
+
 + (BOOL)debugLog {
     kKGDebugEnabled = [[self defaults] boolForKey:@"DebugLog"];
     return kKGDebugEnabled;
