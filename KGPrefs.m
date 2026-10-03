@@ -33,7 +33,22 @@ static const CGFloat kKGDefaultCornerRadius = 10.0;
 // 6 = v0.6.0 删掉 GlassOverKeys (实测两次「打开就打不了字」), 新增「按键区底色调淡」。
 //     **必须升**: 用户存档里 GlassOverKeys 很可能开着, 不迁移的话设置面板里
 //     还会露出那个开关, 用户一开就又打不了字 —— 又是一次「装上就废」。
-static const NSInteger kKGParamsVersion = 7;
+// 8 = v1.0.0 架构重写。**必须升**, 两个原因:
+//     a) 删除 WorkMode(工作模式)。v1.0.0 只按「uie=0 铁律」单线施工,
+//        不再需要二分隔离档位; 留着旧档位只会让人拖到「纯探针」以为插件没生效。
+//     b) 新增 GlassTransparency。这是 v1.0.0 唯一的新参数, 且它控制的
+//        那层(_UIVisualEffectBackdropView)实测 uie=0, 是键盘「实心浅灰」
+//        真正的元凶。旧存档里没有它, 不迁移就永远是 registerDefaults 的 0.65,
+//        而用户之前十一个版本攒下的「底色浓度」是按另一套语义调出来的, 得重置。
+static const NSInteger kKGParamsVersion = 8;
+
+// v1.0.0: 玻璃通透度默认值。系统那层浓白调淡 65% —— 留 35% 压住, 保证
+// 按键上的白字在浅色 App 背景下仍然读得清。拖到 1.0 玻璃感最强。
+static const CGFloat kKGDefaultGlassTransparency = 0.65;
+
+// v1.0.0: 按键区底色调淡默认值。与通透度分开, 因为这两层压在一起才
+// 决定「按键区透不透」。0.7 调淡 70% 留 30% 底色, 键缝能透出玻璃。
+static const CGFloat kKGDefaultKeyplaneDim = 0.70;
 
 static BOOL kKGDebugEnabled = NO;
 
@@ -69,20 +84,18 @@ void KGLog(NSString *format, ...) {
         // 默认 YES: 玻璃层插在原生背板的上一层, 藏着它的话玻璃只会采到
         // 那块背板本身, 模糊等于没做。想让玻璃真采到键盘下方的画面就得让位。
         @"HideNativeBackdrop": @YES,
-        // v0.6.0: 按键区底色调淡强度。
-        // v0.7.3: 默认 0.75 -> 0.65。理由: 这三张 SplitImageView 既是观感上的
-        // 底板, 也是键盘接收点击的实体层。拖太淡会导致键盘以外的界面点不动。
-        // 「按键区不透明」是这个版本要解决的主问题, 所以默认就开着,
-        // 用户觉得太透可以拖回 0。
-        @"KeyplaneDim":        @0.65,
-        // v0.6.0 已废弃: GlassOverKeys 恒为 NO, 这里保留只为清掉旧存档。
-        @"GlassOverKeys":      @NO,
+        // v1.0.0: 玻璃通透度。控制 _UIVisualEffectBackdropView(系统那层
+        // 85% 浓白, 实测 uie=0)的调淡程度 —— 键盘「实心浅灰」的真凶。
+        @"GlassTransparency":  @(kKGDefaultGlassTransparency),
+        // v1.0.0: 按键区底色调淡。v0.7.3 那个 0.55「触摸安全下限」已删除 ——
+        // 实测 UIKBSplitImageView 是 uie=0 纯视觉层, 本来就与触摸派发无关,
+        // 加下限只是自己吓自己, 还把观感自由度锁死了。
+        @"KeyplaneDim":        @(kKGDefaultKeyplaneDim),
         @"DebugLog":           @NO,
         @"ShowLayerOutline":   @NO,
-        // 默认「纯探针」: 唯一一档被用户实测过「能打字」的。
-        // 完整档会插玻璃层 + 藏原生背景, 这两件事都还在验证中, 不能默认开。
-        @"WorkMode":           @(KGWorkModeProbe),
     }];
+    // v1.0.0: WorkMode / GlassOverKeys 已彻底废弃, 这里**不注册**。
+    // 注册一个永远没人读的下拉项, 只会让人拖到「纯探针」档以为插件没生效。
     kKGDebugEnabled = [[self defaults] boolForKey:@"DebugLog"];
     [self runParamsMigrationIfNeeded];
 }
@@ -103,19 +116,14 @@ void KGLog(NSString *format, ...) {
     [d setObject:@(kKGDefaultVeil)       forKey:@"LiquidVeil"];
     [d setObject:@(kKGDefaultCornerRadius) forKey:@"CornerRadius"];
     [d setObject:@YES                    forKey:@"HideNativeBackdrop"];
-    // v0.6.0: 默认把按键区底色调到 25% —— 「按键区不透明」是这一版要解决的主问题。
-    [d setObject:@0.65                   forKey:@"KeyplaneDim"];
-    [d setObject:@NO                     forKey:@"GlassOverKeys"];
-    // v0.4.1 起退回「纯探针」, v0.5.0 继续保持。
-    //
-    // v0.3.0 我把默认设成 Full, 理由是「玻璃层是纯 CALayer, 不可能挡触摸」——
-    // 这个理由是错的, 而且从没被验证过: 用户说「能打字」时用的是 Probe/Hide 档,
-    // 那两档根本不插玻璃层。v0.4.0 上了 Full 档后用户立刻反馈「又不能点击了」。
-    //
-    // v0.5.0 玻璃层从 CALayer 换成了 UIView, 触摸安全从「layer 天生不参与命中」
-    // 换成「显式 userInteractionEnabled=NO」。机制上更硬, 但**依然没实测过**。
-    // 铁律不变: 默认档必须是用户亲自验证过能打字的那一档。
-    [d setObject:@(KGWorkModeProbe)        forKey:@"WorkMode"];
+    // v1.0.0 推荐值。
+    [d setObject:@(kKGDefaultGlassTransparency) forKey:@"GlassTransparency"];
+    [d setObject:@(kKGDefaultKeyplaneDim)       forKey:@"KeyplaneDim"];
+    // v1.0.0: 把两个已废弃的下拉项从存档里**彻底删掉**, 不只是写个默认值。
+    // 用户之前十一个版本攒下的 WorkMode / GlassOverKeys 没有保留价值,
+    // 留着只会让设置面板冒出没人认得的档位名。
+    [d removeObjectForKey:@"WorkMode"];
+    [d removeObjectForKey:@"GlassOverKeys"];
     [d synchronize];
 }
 
@@ -219,22 +227,19 @@ void KGLog(NSString *format, ...) {
     return [d boolForKey:@"HideNativeBackdrop"];
 }
 
-+ (KGWorkMode)workMode {
-    NSUserDefaults *d = [self defaults];
-    if ([d objectForKey:@"WorkMode"] == nil) return KGWorkModeProbe;
-    NSInteger raw = [d integerForKey:@"WorkMode"];
-    if (raw < KGWorkModeProbe || raw > KGWorkModeFull) return KGWorkModeProbe;
-    return (KGWorkMode)raw;
-}
-
 + (BOOL)showLayerOutline {
     return [[self defaults] boolForKey:@"ShowLayerOutline"];
 }
 
-+ (BOOL)glassOverKeys {
-    // 【v0.6.0 已废弃】永远返回 NO。实测两次「打开就不能打字」(见 KGPrefs.h)。
-    // 保留这个方法只是为了让旧代码还能编过, 设置面板也不再暴露它。
-    return NO;
++ (CGFloat)glassTransparency {
+    NSUserDefaults *d = [self defaults];
+    if ([d objectForKey:@"GlassTransparency"] == nil) {
+        return kKGDefaultGlassTransparency;
+    }
+    CGFloat v = [d doubleForKey:@"GlassTransparency"];
+    if (v < 0) v = 0;
+    if (v > 1) v = 1;
+    return v;
 }
 
 + (CGFloat)keyplaneDim {

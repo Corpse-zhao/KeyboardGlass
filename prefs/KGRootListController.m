@@ -19,19 +19,20 @@ static void KGProbe(NSString *msg) {
 // 3 = 工作模式默认切到「完整」(这一步是错的), 4 = 默认退回「纯探针」,
 // 5 = v0.5.0 换 UIVisualEffectView 架构, 模糊/底色/圆角换新默认,
 // 6 = v0.6.0 删掉 GlassOverKeys (实测两次导致打不了字), 新增「按键区底色调淡」。
+// 8 = v1.0.0 架构重写: 删掉 WorkMode 二分隔离档位, 新增「玻璃通透度」。
 //
 // **必须和 KGPrefs.m 里的 kKGParamsVersion 保持一致。**
 // v0.4.3 之前两边是 4 和 5 不一致 —— 插件进程先迁移到自己的版本号, 设置
 // 进程再迁移一次, 谁先跑谁说了算, 迁移结果不确定。这类「双份常量」必须
 // 当成一个字段看待, 改一边就要同时改另一边。
-static const NSInteger kKGParamsVersion = 7;
-static const NSInteger kKGWorkModeProbe = 0;   // 必须与 KGPrefs.m 的 KGWorkModeProbe 一致
+static const NSInteger kKGParamsVersion = 8;
 static const double kKGRecommendedBlur       = 18.0;
 static const double kKGRecommendedRefraction = 14.0;
 static const double kKGRecommendedHighlight  = 0.55;
 static const double kKGRecommendedVeil       = 0.52;
 static const double kKGRecommendedRadius     = 10.0;
-static const double kKGRecommendedKeyDim     = 0.65;   // v0.7.4: 该参数已停用, 仅保留兼容
+static const double kKGRecommendedTransp     = 0.65;  // v1.0.0: 玻璃通透度
+static const double kKGRecommendedKeyDim     = 0.70;  // v1.0.0: 触摸下限已删, 纯观感
 
 // 早期版本的默认值在键盘上完全看不出效果, 用户会以为插件没装成功。
 // 这里在「设置」进程里做一次迁移 —— 这个进程不沙盒, 写进去的位置插件
@@ -54,18 +55,17 @@ static void KGMigrateParamsIfNeeded(NSUserDefaults *defaults) {
     [defaults setObject:@(kKGRecommendedHighlight)  forKey:@"LiquidHighlight"];
     [defaults setObject:@(kKGRecommendedVeil)       forKey:@"LiquidVeil"];
     [defaults setObject:@(kKGRecommendedRadius)      forKey:@"CornerRadius"];
-    // v0.4.1: 退回纯探针 —— 唯一被实测确认「能打字」的一档。
-    // v0.3.0~0.4.0 我错误地把默认设成了「完整」, 理由是一句没验证过的推断,
-    // 结果用户直接反馈「又不能点击了」。默认档必须是用户亲自验证过的。
-    [defaults setObject:@(kKGWorkModeProbe)         forKey:@"WorkMode"];
     [defaults setObject:@YES                        forKey:@"HideNativeBackdrop"];
-    [defaults setObject:@(kKGRecommendedKeyDim)    forKey:@"KeyplaneDim"];
-    // v0.6.0: GlassOverKeys 已废弃。迁移时**显式写 NO 并从存档里删掉** ——
-    // 用户存档里它很可能开着, 留着就等于「装上就废」的定时炸弹。
-    [defaults setObject:@NO                         forKey:@"GlassOverKeys"];
+    [defaults setObject:@(kKGRecommendedTransp)     forKey:@"GlassTransparency"];
+    [defaults setObject:@(kKGRecommendedKeyDim)     forKey:@"KeyplaneDim"];
+    // v1.0.0: 三个已废弃的下拉项/开关**从存档里彻底删除**。
+    // WorkMode 是 v0.3.0~0.7.4 的二分隔离产物, v1.0.0 按 uie=0 铁律
+    // 单线施工, 不再需要档位; GlassOverKeys 是 v0.6.0 的废项。
+    // 留着它们, 用户会拖到「① 纯探针」然后以为插件没生效。
+    [defaults removeObjectForKey:@"WorkMode"];
     [defaults removeObjectForKey:@"GlassOverKeys"];
     [defaults synchronize];
-    KGProbe([NSString stringWithFormat:@"[migrate] 参数版本 %ld -> %ld, 已写入推荐值 + 工作模式=纯探针 + 熔断计数已清零",
+    KGProbe([NSString stringWithFormat:@"[migrate] 参数版本 %ld -> %ld, 已写入 v1.0.0 推荐值 + 废弃项已清除 + 熔断计数已清零",
              (long)old, (long)kKGParamsVersion]);
 }
 
@@ -137,11 +137,12 @@ static void KGMigrateParamsIfNeeded(NSUserDefaults *defaults) {
     [defaults setObject:@(kKGRecommendedVeil)       forKey:@"LiquidVeil"];
     [defaults setObject:@(kKGRecommendedRadius)      forKey:@"CornerRadius"];
     [defaults setObject:@YES                        forKey:@"HideNativeBackdrop"];
-    [defaults setObject:@(kKGRecommendedKeyDim)    forKey:@"KeyplaneDim"];
-    [defaults setObject:@(kKGWorkModeProbe)         forKey:@"WorkMode"];
+    [defaults setObject:@(kKGRecommendedTransp)     forKey:@"GlassTransparency"];
+    [defaults setObject:@(kKGRecommendedKeyDim)     forKey:@"KeyplaneDim"];
+    [defaults removeObjectForKey:@"WorkMode"];
     [defaults removeObjectForKey:@"GlassOverKeys"];
     [defaults synchronize];
-    KGProbe(@"[reset] 已恢复推荐参数 (工作模式=纯探针)");
+    KGProbe(@"[reset] 已恢复 v1.0.0 推荐参数 (废弃项已清除)");
     _specifiers = nil;
     [self reloadSpecifiers];
 }

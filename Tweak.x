@@ -81,6 +81,6 @@
     @autoreleasepool {
         [KGPrefs registerDefaults];
         [[KGKeyboardInstaller shared] startWorker];
-        KGLog(@"KeyboardGlass 已加载 (0.7.4)");
+        KGLog(@"KeyboardGlass 已加载 (1.0.0)");
     }
 }

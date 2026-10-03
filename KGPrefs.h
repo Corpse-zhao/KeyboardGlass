@@ -19,26 +19,6 @@ typedef struct KGStyle {
     BOOL    dark;          // 是否深色模式
 } KGStyle;
 
-// 工作模式 —— 二分隔离用的, 一次安装就能连测几档, 不用反复重装。
-//
-// 【重要】默认必须是 KGWorkModeProbe —— 唯一一档被用户实测过「能打字」的。
-// 其余各档都在验证中: v0.3.0~0.4.0 期间, 我曾因为「玻璃层是纯 CALayer,
-// hitTest 只遍历 view, 所以不可能挡触摸」而把默认设成 Full。这个推理是错的:
-// 那句话从没被验证过 —— 用户当时能打字用的是 Probe/Hide 档, 而那两档
-// 根本不插玻璃层。v0.4.0 开了 Full 之后用户立刻反馈「又不能点击了」。
-// **「机制上不可能」不等于「实测不会」, 别拿推理当实测。**
-//
-//   Probe: 只 hook、只写探针, 一个节点都不碰 —— 唯一验证过安全的基准档
-//   Hide : 额外只做一件事: 把某**一**层原生背景 alpha 归零
-//   Glass: 插玻璃层, 但**完全不碰原生背景** ← 隔离「玻璃层本身是否挡触摸」
-//   Full : 玻璃层 + 藏背景 (Hide 与 Glass 的组合)
-typedef NS_ENUM(NSInteger, KGWorkMode) {
-    KGWorkModeProbe = 0,   // 纯探针: 完全不碰视图树
-    KGWorkModeHide  = 1,   // 只隐藏一层原生背景
-    KGWorkModeGlass = 2,   // 只插玻璃层, 不动原生背景
-    KGWorkModeFull  = 3,   // 完整: 玻璃层 + 藏背景
-};
-
 extern NSString * const KGPrefsSuiteName;
 
 @interface KGPrefs : NSObject
@@ -57,32 +37,26 @@ extern NSString * const KGPrefsSuiteName;
 + (BOOL)hideNativeBackdrop;
 + (BOOL)debugLog;
 
-// 工作模式 (二分隔离用, 见 KGWorkMode 注释)
-+ (KGWorkMode)workMode;
-
 // 调试: 在玻璃层四周画一圈青色边框、内部铺半透明品红。
 // 用来一眼确认「层到底装上了没有、位置尺寸对不对」—— 比调参数猜要快得多。
 + (BOOL)showLayerOutline;
 
-// v0.4.2: 玻璃层插在按键之上还是之下。
+// v1.0.0 新增: 玻璃通透度 0-1, 滑块名字叫「玻璃通透度」。
 //
-// 【v0.6.0 已废弃, 永远返回 NO —— 不要在设置面板里再暴露它】
-// 这个方向已被实测否掉**两次**: v0.2.0 用纯 CALayer 时打开就「打不了字」,
-// v0.5.2 换成 UIVisualEffectView + 显式 userInteractionEnabled=NO 之后,
-// 用户仍然反馈「打开玻璃盖住按键区就不能打字了」。
-// 两次架构完全不同结论一致, 说明「玻璃盖住按键」这条路本身走不通。
-// 「按键区不透明」改用 keyplaneDim 解决(调淡按键区自带底色), 玻璃永远在按键之下。
-+ (BOOL)glassOverKeys;
+// 它控制的是**系统自己那层 85% 浓白** (_UIVisualEffectBackdropView,
+// uie=0) 的调淡程度。实测这层才是键盘「实心浅灰」的真正元凶 ——
+// v0.7.0~0.7.4 一直在调别的层, 所以怎么调都不对。
+//
+// 0   = 完全保持系统原样(实心浅灰)
+// 1   = 调到最透(玻璃感最强, 但按键文字可能不够清楚)
+// 0.65= 推荐: 既有明显玻璃感, 又保证按键字看得清
++ (CGFloat)glassTransparency;
 
-// v0.6.0 新增: 按键区自带底色的调淡强度 0-1。
+// 按键区底色调淡 0-1。作用在 UIKBSplitImageView (实测 uie=0 纯视觉层)。
 //
-// 这是「按键区不透明」的正解: 按键区容器自带一层不透明底色, 类名里没有
-// "Backdrop", 藏背景那一套永远选不中它。它压在玻璃层**上面**, 于是玻璃插在
-// 按键之下时, 只有键缝透出玻璃, 按键区自己那块实色仍然盖着。
-//
-// 为什么是「调淡」而不是「藏掉」: alpha=0 会让整棵子树退出 hitTest,
-// v0.4.0 实测「又不能点击了」。调淡到 0.25 观感够透, 子树仍在 hitTest 里。
-// 0 = 完全不动, 保持系统原样。
+// 【v1.0.0 语义已变】v0.7.3 那个 0.55「触摸安全下限」是基于
+// 「它是触摸层」的误判, 实测该层 uie=0, 本来就与触摸派发无关。
+// 下限已整个删除, 这个滑块重新变回纯观感控制, 拖到 0.9 也只影响外观。
 + (CGFloat)keyplaneDim;
 
 // 一次性参数迁移: 早期版本的默认值 (blur 5 / veil 0) 几乎完全不可见,

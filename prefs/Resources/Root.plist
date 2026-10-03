@@ -32,44 +32,6 @@
 			<key>cell</key>
 			<string>PSLinkListCell</string>
 			<key>default</key>
-			<integer>0</integer>
-			<key>defaults</key>
-			<string>com.banli.keyboardglass.preferences</string>
-			<key>detail</key>
-			<string>PSListItemsController</string>
-			<key>get</key>
-			<string>readPreferenceValue:</string>
-			<key>key</key>
-			<string>WorkMode</string>
-			<key>label</key>
-			<string>工作模式</string>
-			<key>set</key>
-			<string>setPreferenceValue:specifier:</string>
-			<key>validTitles</key>
-			<array>
-				<string>① 纯探针（什么都不改）</string>
-				<string>② 只隐藏一层原生背景</string>
-				<string>③ 只插玻璃层</string>
-				<string>④ 玻璃层 + 藏背景</string>
-			</array>
-			<key>validValues</key>
-			<array>
-				<integer>0</integer>
-				<integer>1</integer>
-				<integer>2</integer>
-				<integer>3</integer>
-			</array>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>footerText</key>
-			<string>默认「① 纯探针」，这是唯一确认过不影响打字的一档。往上试的时候一次只加一档：③ 只插玻璃层、不碰原生背景，用来判断玻璃层本身会不会挡住触摸；② 只藏背景不插玻璃层。确认安全之后再用④。改完切一次键盘即可生效。</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSLinkListCell</string>
-			<key>default</key>
 			<integer>3</integer>
 			<key>defaults</key>
 			<string>com.banli.keyboardglass.preferences</string>
@@ -99,6 +61,14 @@
 				<integer>2</integer>
 				<integer>3</integer>
 			</array>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>1.0.0 是架构重写版。老版本反复修「键盘以外点不动」无效，原因已查明：之前一直把系统里那些「不参与点击判断」的纯视觉层当成触摸层在调。1.0.0 只动不参与点击判断的层，从机制上排除打字被破坏的可能。原来的「工作模式」下拉项已删除，不需要再选档。</string>
+			<key>label</key>
+			<string>版本说明</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -218,6 +188,38 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
+			<string>通透度是 1.0.0 新增的主控滑块。系统键盘自己带一层很浓的浅灰底色，之前十一个版本一直没找到正确的层去调它，所以怎么调都不透 —— 这一版才真正把它调淡。拖到最右玻璃感最强；拖到最左就是系统原样。</string>
+			<key>label</key>
+			<string>通透度</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSStaticTextCell</string>
+			<key>cellClass</key>
+			<string>KGSliderCell</string>
+			<key>default</key>
+			<real>0.65</real>
+			<key>defaults</key>
+			<string>com.banli.keyboardglass.preferences</string>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>key</key>
+			<string>GlassTransparency</string>
+			<key>label</key>
+			<string>玻璃通透度</string>
+			<key>max</key>
+			<real>1.0</real>
+			<key>min</key>
+			<real>0.0</real>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+			<key>showValue</key>
+			<true/>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
 			<string>顶部圆角让键盘像 iOS 26 那样从屏幕底部浮起来。设为 0 则保持原来的直角。</string>
 			<key>label</key>
 			<string>键盘外观</string>
@@ -272,7 +274,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>本版起该滑块已停用：调淡系统底板不是「键盘以外点不动」的病根（真正的病根是键盘窗口上方那层全屏手势覆盖层，本版已单独处理）。系统底板一律保持原值，玻璃感改由上面的「底色浓度」控制。留在这里只是兼容旧配置，不需要再动它。</string>
+			<string>这一版重新启用了该滑块。老版本给它设过一个 0.55 的下限，理由是「怕拖太淡导致键盘点不动」——1.0.0 已查明这是误判：按键区那层图不参与点击判断，拖到多少都不影响打字。所以现在它只管观感，想多透就多透。</string>
 			<key>label</key>
 			<string>按键区底色</string>
 		</dict>
@@ -282,7 +284,7 @@
 			<key>cellClass</key>
 			<string>KGSliderCell</string>
 			<key>default</key>
-			<real>0.65</real>
+			<real>0.70</real>
 			<key>defaults</key>
 			<string>com.banli.keyboardglass.preferences</string>
 			<key>get</key>
@@ -292,7 +294,7 @@
 			<key>label</key>
 			<string>底色调淡强度</string>
 			<key>max</key>
-			<real>1.0</real>
+			<real>0.9</real>
 			<key>min</key>
 			<real>0.0</real>
 			<key>set</key>
@@ -366,7 +368,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>板栗仁 · KeyboardGlass 0.7.4</string>
+			<string>板栗仁 · KeyboardGlass 1.0.0</string>
 		</dict>
 	</array>
 	<key>title</key>
