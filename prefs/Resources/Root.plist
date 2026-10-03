@@ -272,7 +272,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>键盘自带两层不透明底色：系统毛玻璃糊的浓白，以及按键区的底图。这个滑块同时调淡它们，让玻璃透上来。拖到 0 = 保持系统原样不动它；拖到 1 = 几乎全透，玻璃感最强但按键对比度会降。0.8 左右是观感和可读性的折中。</string>
+			<string>调淡按键区脚下的底图，让玻璃从键缝透上来。拖到 0 = 保持系统原样；往右拖越透明，玻璃感越强。0.6~0.7 是观感和可读性的折中，不要拖到最右——底板同时是键盘接收点击的实体层，调得太淡会导致键盘以外的界面点不动。</string>
 			<key>label</key>
 			<string>按键区底色</string>
 		</dict>
@@ -282,7 +282,7 @@
 			<key>cellClass</key>
 			<string>KGSliderCell</string>
 			<key>default</key>
-			<real>0.75</real>
+			<real>0.65</real>
 			<key>defaults</key>
 			<string>com.banli.keyboardglass.preferences</string>
 			<key>get</key>
@@ -366,7 +366,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>板栗仁 · KeyboardGlass 0.7.2</string>
+			<string>板栗仁 · KeyboardGlass 0.7.3</string>
 		</dict>
 	</array>
 	<key>title</key>

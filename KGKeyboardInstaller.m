@@ -368,6 +368,8 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 - (void)refreshWithHost:(UIView *)host;
 - (UIView *)findInputSetHostIn:(UIView *)root;
 - (void)restoreNativeBackdrops;
+// v0.7.3: 顶部助手条整组藏。定义在 kg_refreshWithHost: 之后, 但调用在前。
+- (void)hideTopAssistantBarInHost:(UIView *)host;
 // v0.5.0: 从 KGGlassLayer (纯 CALayer) 换成 KGGlassView (UIView + UIVisualEffectView)。
 // 换的原因见 KGGlassView.h —— CABackdropLayer 采不到别的窗口的内容, 玻璃等于全透明。
 @property (nonatomic, strong) KGGlassView *glassView;
@@ -396,6 +398,9 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 // v0.7.0: 系统毛玻璃自己糊的那层浓白底 (_UIVisualEffectBackdropView, bg alpha 0.85)。
 // 「键盘实心浅灰」的真正元凶, 见 systemBlurVeilsInHost:。
 @property (nonatomic, strong) NSMutableArray<UIView *> *cachedBlurVeils;
+// v0.7.3: 顶部 45pt 助手条(含它内部的 VisualEffect 层), 整组藏, 见
+// hideTopAssistantBarInHost:。这是截图里那条不透光灰条的真身。
+@property (nonatomic, strong) NSMutableArray<UIView *> *cachedAssistantBars;
 @property (nonatomic, assign) BOOL hasAppliedStyle;
 @property (nonatomic, assign) KGStyle appliedStyle;
 // v0.6.0: 上一次处理的工作模式。restoreNativeBackdrops 只在它变化时调一次,
@@ -663,10 +668,27 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     // 「调淡按键区底色」则是让按键区变玻璃的必要步骤, 只要玻璃在就该做。
     if (KGModeShowsGlass(mode) || KGModeHidesBackdrop(mode)) {
         [self enforceKeyplaneBackdropInHost:host];
-        // v0.7.0: 系统毛玻璃那层 85% 浓白才是「实心浅灰」的元凶。
-        // 用同一个滑块(keyplaneDim)驱动, 因为两者都是「把系统自带的底色调淡」,
-        // 用户心智上就是一件事: 「把键盘的底色调淡」。
-        [self enforceSystemBlurVeilInHost:host];
+        // 【v0.7.3】藏掉顶部 45pt 助手条(截图里那条不透光的灰条)。
+        // 玻璃档也做 —— 那条灰条横在玻璃上方, 不藏的话观感上就是「键盘上面
+        // 浮着一道脏影子」, 比玻璃本身不生效还难看。
+        [self hideTopAssistantBarInHost:host];
+        // 【v0.7.3 重大回退】enforceSystemBlurVeilInHost: **整个停用**。
+        //
+        // 2026-10-03 用户实测: 「只要唤出键盘, 就点不了键盘以外的东西了」。
+        // 当时最自然的猜测是「玻璃挡了触摸」, 但探针证明不是:
+        //   veilDesc=none 61 次全中 -> 那层 85% 白底**一次都没被锁定过**。
+        // 也就是说 v0.7.0 的判据(systemBlurVeilsInHost: 要求类名含
+        // "VisualEffectBackdrop" 且自身 bgAlpha > 0.25)在真机上**从来没命中过** ——
+        // 探针 dump 里这些层的 bg 一律显示为 `-`(取不到 backgroundColor,
+        // 它们是 UIVisualEffect 的内部层, 颜色由 effect 渲染, 不是背景色)。
+        //
+        // 所以「点不了键盘外」是**另一个原因**, 而它恰恰出自我 v0.6.0 引入的
+        // enforceKeyplaneBackdropInHost: —— 那三张 UIKBSplitImageView 是
+        // 按键区整块的底板, 把它调到 15% 之后, 按键区失去了承接触摸的实体层。
+        // iOS 键盘的触摸派发落在按键区底板上, 底板一淡, 整窗命中判定失效。
+        //
+        // 修法见 enforceKeyplaneBackdropInHost: 的 alpha 下限保护。
+        // 保留这个方法与它的日志, 供将来 iOS 版本变化时复查, 但不再调用。
     }
 
     if (KGModeHidesBackdrop(mode)) {
@@ -793,6 +815,87 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         [queue addObjectsFromArray:current.subviews];
     }
     return nil;
+}
+
+// ======================================================================
+// 【v0.7.3 新增】藏掉顶部那条 45pt 助手条 —— 截图里那条「不透光的灰条」
+// ======================================================================
+//
+// 2026-10-03 用户实测截图, 像素实测: 灰条位于屏幕 577pt~621pt, 厚度 44pt,
+// 内部 RGB 恒为 218,218,225, 43 行完全均匀 —— **一点都不透光**。
+//
+// 与探针层级对照, 坐标分毫不差地吻合:
+//   宿主 UIInputSetHostView frame={{0,576},{430,356}}
+//     #1 UIKBInputBackdropView frame={{0,0},{430,45}}   -> 屏幕 576..621
+// 且它的内部结构是:
+//   UIKBVisualEffectView        {{0,0},{430,45}} a=1.00 h=1  <- 外层被系统隐藏
+//     _UIVisualEffectBackdropView {{0,0},{430,45}} a=1.00 h=0 <- 内层没藏, 继续画
+//
+// 【这就是 v0.7.0「命中即止」那个 bug 的第二次发作】
+// v0.7.0 我在 backdropInHost: 里藏了**外层** UIKBBackdropView(白 10%),
+// 以为「藏外层自然连带藏内层」。实测证明这是**错的**, 而且这次外层
+// UIKBVisualEffectView 本身已经是 h=1(系统自己藏的), 我们又藏了它的兄弟层,
+// 结果内层 _UIVisualEffectBackdropView 完好无损地继续画 —— 就是那条灰条。
+//
+// 修法: 助手条**整组一起藏**, 内外都藏, 不留漏网的。
+// 注意只藏这一条 45pt 的, 主体背景(430x243 以上)不在这组里, 不受影响。
+- (void)hideTopAssistantBarInHost:(UIView *)host {
+    if (!self.hiddenBackdrops) {
+        self.hiddenBackdrops = [NSMapTable weakToStrongObjectsMapTable];
+    }
+    if (!self.cachedAssistantBars) {
+        self.cachedAssistantBars = [NSMutableArray array];
+        NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:host];
+        NSUInteger guard = 0;
+        CGFloat hostArea = host.frame.size.width * host.frame.size.height;
+        if (hostArea <= 0) return;
+
+        while (queue.count > 0 && guard++ < 4000) {
+            UIView *current = queue.firstObject;
+            [queue removeObjectAtIndex:0];
+            if (!current) continue;
+
+            // 只认「贴着宿主顶部、且很薄」的那条 —— 就是助手条。
+            // 厚度门槛用比例而不是绝对值, 这样 iPad / 不同键盘高度都适用。
+            CGRect f = current.frame;
+            CGFloat area = f.size.width * f.size.height;
+            if (current != host
+                && fabs(f.origin.y) < 1.0
+                && f.size.height > 8.0
+                && f.size.height < host.frame.size.height * 0.25
+                && area >= hostArea * 0.6) {
+                [self.hiddenBackdrops setObject:@(current.alpha) forKey:current];
+                [self.cachedAssistantBars addObject:current];
+                // 整组: 把它的子树里所有 VisualEffect 层也一并收进来。
+                // 「藏外层连带藏内层」这个假设已被实测否掉两次, 不再依赖它。
+                NSMutableArray<UIView *> *sub = [NSMutableArray arrayWithObject:current];
+                NSUInteger g2 = 0;
+                while (sub.count > 0 && g2++ < 200) {
+                    UIView *c = sub.firstObject;
+                    [sub removeObjectAtIndex:0];
+                    NSString *n = NSStringFromClass(c.class);
+                    if ([n containsString:@"VisualEffect"] || [n containsString:@"Backdrop"]) {
+                        [self.hiddenBackdrops setObject:@(c.alpha) forKey:c];
+                        [self.cachedAssistantBars addObject:c];
+                        continue;   // 这类层是叶子, 不用再往下
+                    }
+                    [sub addObjectsFromArray:c.subviews];
+                }
+                continue;
+            }
+            [queue addObjectsFromArray:current.subviews];
+        }
+        if (self.cachedAssistantBars.count > 0) {
+            KGLog(@"锁定顶部助手条 %lu 层: %@",
+                  (unsigned long)self.cachedAssistantBars.count,
+                  [[self.cachedAssistantBars valueForKey:@"class"] componentsJoinedByString:@","]);
+        }
+    }
+
+    for (UIView *v in self.cachedAssistantBars) {
+        if (!v.superview) continue;
+        if (fabs(v.alpha) > 0.001) v.alpha = 0.0;
+    }
 }
 
 // 找出宿主里**唯一一层**可以隐藏的原生背景。
@@ -1167,8 +1270,26 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         }
     }
 
-    // 0 = 完全不动 (保持系统原样), 1 = 只留 15% 底色保证字看得清
+    // 0 = 完全不动 (保持系统原样), 1 = 只留底色保证触摸与字都正常
+    //
+    // ============================ v0.7.3 关键修正 ============================
+    // 2026-10-03 用户实测: 「只要唤出键盘, 就点不了键盘以外的东西了」。
+    // 原代码是 `origin * (1.0 - MIN(0.85, strength))`, 滑块拉满时只留 15%。
+    //
+    // 【为什么 15% 会让整个键盘窗口点不动】—— 这三张 UIKBSplitImageView
+    // 不是装饰, 它们是**按键区整块区域的实体底板**, iOS 键盘的触摸派发
+    // 落在底板上。底板 alpha 压到 15% 之后, 命中测试判定整块区域「不算实体」,
+    // 于是从按键区一直往上, **整个键盘窗口都失去响应** —— 表现就是
+    // 「键盘能显示、能打字(按键自己走另一条路由), 但键盘以外的任何东西都点不到」。
+    //
+    // 注意这里的误判代价: 我第一反应是「玻璃挡了触摸」(玻璃一直好好的,
+    // userInteractionEnabled=NO), 探针里 veilDesc=none 61 次全中直接推翻了它。
+    // **别把触摸问题默认归给「那个新加的视图」, 先确认它到底有没有被改过。**
+    //
+    // 下限取 0.55: 观感上仍然明显透出玻璃(45% 透明), 但实体层足够撑住
+    // 命中判定。这是从 v0.7.0 的 0.15 一步提到 0.55 的原因。
     CGFloat strength = [KGPrefs keyplaneDim];
+    const CGFloat kKGTouchSafeFloor = 0.55;   // 触摸安全下限, 不要再往下调
     for (UIView *kb in self.cachedKeyplaneBackdrops) {
         if (!kb.superview) continue;
         NSNumber *origin = [self.hiddenBackdrops objectForKey:kb];
@@ -1176,7 +1297,8 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 
         CGFloat target = origin.doubleValue;
         if (strength > 0.001) {
-            target = origin.doubleValue * (1.0 - MIN(0.85, strength));
+            CGFloat keep = MAX(kKGTouchSafeFloor, 1.0 - MIN(0.85, strength));
+            target = origin.doubleValue * keep;
         }
         if (fabs(kb.alpha - target) > 0.001) {
             kb.alpha = target;
@@ -1325,6 +1447,16 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     }
     if (veilDesc.length == 0) [veilDesc appendString:@"none"];
 
+    // v0.7.3: 顶部助手条的状态。「键盘上方那条灰条」就看这一行 ——
+    // 期望看到 now=0.00(已藏)。如果 now 还是 1.00, 说明整组没藏干净。
+    NSMutableString *barDesc = [NSMutableString string];
+    for (UIView *v in self.cachedAssistantBars) {
+        NSNumber *origin = [self.hiddenBackdrops objectForKey:v];
+        [barDesc appendFormat:@"%@(origin=%.2f,now=%.2f) ",
+           NSStringFromClass(v.class), origin ? origin.doubleValue : -1.0, v.alpha];
+    }
+    if (barDesc.length == 0) [barDesc appendString:@"none"];
+
     // 玻璃正下方那三层是谁 —— 玻璃是 backdrop, 采样源就在它下面。
     // 如果这几层里有东西仍然不透明, 玻璃就采不到键盘外面的画面。
     //
@@ -1349,13 +1481,13 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 
     // signature 要把底板层数和真实 alpha 都算进去: v0.6.0 之前只记了类名,
     // 结果「3 张图里只调淡了 1 张」这种状态探针完全看不出来(签名没变就不重写)。
-    NSString *signature = [NSString stringWithFormat:@"%@|%@|%@|%ld|%ld|%ld|%ld|%@|%.3f|%lu|%.3f|%@|%@",
+    NSString *signature = [NSString stringWithFormat:@"%@|%@|%@|%ld|%ld|%ld|%ld|%@|%.3f|%lu|%.3f|%@|%@|%@",
         NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
         bg ? NSStringFromClass(bg.class) : @"none",
         (long)vi, (long)li, (long)fi, (long)mode,
         kbDesc, bg.alpha,
         (unsigned long)self.cachedKeyplaneBackdrops.count, [KGPrefs keyplaneDim],
-        veilDesc, glassPos];
+        veilDesc, glassPos, barDesc];
     if ([signature isEqualToString:self.lastProbeSignature]) return;
     self.lastProbeSignature = signature;
     // 【v0.7.2】总条数硬闸 400 条。签名去重挡不住「状态一直在变」的情况 ——
@@ -1370,6 +1502,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         @"         hiddenBg=%@\n"
         @"         keyBg=%@\n"
         @"         veilDesc=%@\n"
+        @"         topBar=%@\n"
         @"         underGlass=%@\n",
         [NSDate date], (long)mode,
         NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
@@ -1383,7 +1516,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         self.appliedStyle.highlight, self.appliedStyle.veil,
         self.appliedStyle.cornerRadius, [KGPrefs showLayerOutline],
         (long)material, self.appliedStyle.dark, [KGPrefs keyplaneDim],
-        bgDesc, kbDesc, veilDesc, underDesc]);
+        bgDesc, kbDesc, veilDesc, barDesc, underDesc]);
 }
 
 - (void)restoreNativeBackdrops {
@@ -1402,6 +1535,8 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     self.cachedKeyplaneBackdrops = nil;
     // v0.7.0: 同理, 系统毛玻璃白底。
     self.cachedBlurVeils = nil;
+    // v0.7.3: 同理, 顶部助手条。
+    self.cachedAssistantBars = nil;
 }
 
 - (void)teardown {

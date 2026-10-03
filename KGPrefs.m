@@ -69,10 +69,12 @@ void KGLog(NSString *format, ...) {
         // 默认 YES: 玻璃层插在原生背板的上一层, 藏着它的话玻璃只会采到
         // 那块背板本身, 模糊等于没做。想让玻璃真采到键盘下方的画面就得让位。
         @"HideNativeBackdrop": @YES,
-        // v0.6.0: 按键区底色调淡强度。默认 0.75 -> 调到原来的 25%。
+        // v0.6.0: 按键区底色调淡强度。
+        // v0.7.3: 默认 0.75 -> 0.65。理由: 这三张 SplitImageView 既是观感上的
+        // 底板, 也是键盘接收点击的实体层。拖太淡会导致键盘以外的界面点不动。
         // 「按键区不透明」是这个版本要解决的主问题, 所以默认就开着,
         // 用户觉得太透可以拖回 0。
-        @"KeyplaneDim":        @0.75,
+        @"KeyplaneDim":        @0.65,
         // v0.6.0 已废弃: GlassOverKeys 恒为 NO, 这里保留只为清掉旧存档。
         @"GlassOverKeys":      @NO,
         @"DebugLog":           @NO,
@@ -102,7 +104,7 @@ void KGLog(NSString *format, ...) {
     [d setObject:@(kKGDefaultCornerRadius) forKey:@"CornerRadius"];
     [d setObject:@YES                    forKey:@"HideNativeBackdrop"];
     // v0.6.0: 默认把按键区底色调到 25% —— 「按键区不透明」是这一版要解决的主问题。
-    [d setObject:@0.75                   forKey:@"KeyplaneDim"];
+    [d setObject:@0.65                   forKey:@"KeyplaneDim"];
     [d setObject:@NO                     forKey:@"GlassOverKeys"];
     // v0.4.1 起退回「纯探针」, v0.5.0 继续保持。
     //

@@ -31,7 +31,7 @@ static const double kKGRecommendedRefraction = 14.0;
 static const double kKGRecommendedHighlight  = 0.55;
 static const double kKGRecommendedVeil       = 0.52;
 static const double kKGRecommendedRadius     = 10.0;
-static const double kKGRecommendedKeyDim     = 0.75;
+static const double kKGRecommendedKeyDim     = 0.65;   // v0.7.3: 别再高于此值, 会破坏触摸派发
 
 // 早期版本的默认值在键盘上完全看不出效果, 用户会以为插件没装成功。
 // 这里在「设置」进程里做一次迁移 —— 这个进程不沙盒, 写进去的位置插件
