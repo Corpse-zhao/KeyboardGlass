@@ -14,6 +14,10 @@
 // 【为什么最低档也保留雾感】blur=0 不再映射成「不模糊」, 而是映射到
 // SystemThinMaterial —— 它仍然有明显的雾面磨砂。这是 v0.5.0 的关键修正:
 // 旧版 blur=0 等于把玻璃整个关掉, 用户拖到 0 之后看到的就是「插件没生效」。
+// 【关于最后一档的名字】UIKit 实际导出的是
+// UIBlurEffectStyleSystemUltraThinMaterial{Light,Dark} —— **没有 UltraThick**。
+// 编译器给的提示就是 "did you mean 'UIBlurEffectStyleSystemUltraThinMaterialLight'?"。
+// 「超薄」这档模糊很弱, 只在用户把强度拉到 40 以上时才会用到, 但名字必须写对。
 static UIBlurEffectStyle KGEffectStyleForBlur(CGFloat blur, BOOL dark) {
     if (blur <= 2.5) {
         return dark ? UIBlurEffectStyleSystemThinMaterialDark
@@ -27,8 +31,8 @@ static UIBlurEffectStyle KGEffectStyleForBlur(CGFloat blur, BOOL dark) {
         return dark ? UIBlurEffectStyleSystemThickMaterialDark
                     : UIBlurEffectStyleSystemThickMaterialLight;
     }
-    return dark ? UIBlurEffectStyleSystemUltraThickMaterialDark
-                : UIBlurEffectStyleSystemUltraThickMaterialLight;
+    return dark ? UIBlurEffectStyleSystemUltraThinMaterialDark
+                : UIBlurEffectStyleSystemUltraThinMaterialLight;
 }
 
 @interface KGGlassView ()
@@ -62,8 +66,13 @@ static UIBlurEffectStyle KGEffectStyleForBlur(CGFloat blur, BOOL dark) {
     // 明确契约, 不依赖任何推断。此前两次「打不了字」都是 z 序/藏层误判,
     // 这次把能显式关的全部显式关掉, 不留任何靠推理撑着的环节。
     self.userInteractionEnabled = NO;
-    self.masksToBounds = YES;
-    self.backgroundColor = [UIColor clearColor].CGColor;
+    // 【CALayer -> UIView 的抄写陷阱】CALayer 上叫 masksToBounds, UIView 上叫
+    // clipsToBounds。v0.5.0 从纯 CALayer 改写成 UIView 时, 这一行照抄了过来,
+    // 编译直接报 "property 'masksToBounds' not found"。
+    // 另外 backgroundColor 是 **UIColor** 属性, 赋 CGColorRef 需要桥接 ——
+    // CALayer.backgroundColor 才收 CGColorRef。
+    self.clipsToBounds = YES;
+    self.backgroundColor = [UIColor clearColor];
     self.opaque = NO;
     self.contentMode = UIViewContentModeRedraw;
 
