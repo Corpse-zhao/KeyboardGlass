@@ -30,7 +30,10 @@ static const CGFloat kKGDefaultCornerRadius = 10.0;
 // 5 = v0.5.0 换 UIVisualEffectView 架构, 模糊/底色/圆角全部换新默认。
 //     **必须升**: 用户存档里的 blur=0.0 是旧架构的产物, 不迁移的话
 //     换架构之后依然是 0, 用户会以为新版本也没生效。
-static const NSInteger kKGParamsVersion = 5;
+// 6 = v0.6.0 删掉 GlassOverKeys (实测两次「打开就打不了字」), 新增「按键区底色调淡」。
+//     **必须升**: 用户存档里 GlassOverKeys 很可能开着, 不迁移的话设置面板里
+//     还会露出那个开关, 用户一开就又打不了字 —— 又是一次「装上就废」。
+static const NSInteger kKGParamsVersion = 6;
 
 static BOOL kKGDebugEnabled = NO;
 
@@ -66,6 +69,12 @@ void KGLog(NSString *format, ...) {
         // 默认 YES: 玻璃层插在原生背板的上一层, 藏着它的话玻璃只会采到
         // 那块背板本身, 模糊等于没做。想让玻璃真采到键盘下方的画面就得让位。
         @"HideNativeBackdrop": @YES,
+        // v0.6.0: 按键区底色调淡强度。默认 0.75 -> 调到原来的 25%。
+        // 「按键区不透明」是这个版本要解决的主问题, 所以默认就开着,
+        // 用户觉得太透可以拖回 0。
+        @"KeyplaneDim":        @0.75,
+        // v0.6.0 已废弃: GlassOverKeys 恒为 NO, 这里保留只为清掉旧存档。
+        @"GlassOverKeys":      @NO,
         @"DebugLog":           @NO,
         @"ShowLayerOutline":   @NO,
         // 默认「纯探针」: 唯一一档被用户实测过「能打字」的。
@@ -92,6 +101,8 @@ void KGLog(NSString *format, ...) {
     [d setObject:@(kKGDefaultVeil)       forKey:@"LiquidVeil"];
     [d setObject:@(kKGDefaultCornerRadius) forKey:@"CornerRadius"];
     [d setObject:@YES                    forKey:@"HideNativeBackdrop"];
+    // v0.6.0: 默认把按键区底色调到 25% —— 「按键区不透明」是这一版要解决的主问题。
+    [d setObject:@0.75                   forKey:@"KeyplaneDim"];
     [d setObject:@NO                     forKey:@"GlassOverKeys"];
     // v0.4.1 起退回「纯探针」, v0.5.0 继续保持。
     //
@@ -213,9 +224,16 @@ void KGLog(NSString *format, ...) {
 }
 
 + (BOOL)glassOverKeys {
-    // 默认 NO: 玻璃压在按键上会遮挡按键, 能不能打字从未实测验证过。
-    // 沿用「拿不准就退到已验证的那一侧」这条铁律。
-    return [[self defaults] boolForKey:@"GlassOverKeys"];
+    // 【v0.6.0 已废弃】永远返回 NO。实测两次「打开就不能打字」(见 KGPrefs.h)。
+    // 保留这个方法只是为了让旧代码还能编过, 设置面板也不再暴露它。
+    return NO;
+}
+
++ (CGFloat)keyplaneDim {
+    CGFloat v = [[self defaults] doubleForKey:@"KeyplaneDim"];
+    if (v < 0) v = 0;
+    if (v > 1) v = 1;
+    return v;
 }
 
 + (BOOL)debugLog {

@@ -270,21 +270,35 @@
 		</dict>
 		<dict>
 			<key>cell</key>
-			<string>PSSwitchCell</string>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>玻璃永远插在按键之下, 按键区自带一层不透明底色, 那个底色调淡之后玻璃才能从键缝透上来。拖到 0 = 保持系统原样不动它; 拖到 1 = 只留 15% 底色, 玻璃感最强但按键对比度略降。0.75 左右是观感和可读性的折中。</string>
+			<key>label</key>
+			<string>按键区底色</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSStaticTextCell</string>
+			<key>cellClass</key>
+			<string>KGSliderCell</string>
 			<key>default</key>
-			<false/>
+			<real>0.75</real>
 			<key>defaults</key>
 			<string>com.banli.keyboardglass.preferences</string>
-			<key>footerText</key>
-			<string>玻璃默认插在按键之下, 只有键缝透出玻璃, 按键区仍是原来的不透明底色。打开这个开关会把玻璃移到按键之上, 整块键盘(含按键区)都变成玻璃 —— 那才是 iOS 26 的观感。v0.4.3 起玻璃层已显式关闭触摸响应, 实测打字不受影响; 若个别场景异常, 关掉即可, 玻璃仍然可见。</string>
 			<key>get</key>
 			<string>readPreferenceValue:</string>
 			<key>key</key>
-			<string>GlassOverKeys</string>
+			<string>KeyplaneDim</string>
 			<key>label</key>
-			<string>玻璃盖住按键区</string>
+			<string>底色调淡强度</string>
+			<key>max</key>
+			<real>1.0</real>
+			<key>min</key>
+			<real>0.0</real>
 			<key>set</key>
 			<string>setPreferenceValue:specifier:</string>
+			<key>showValue</key>
+			<true/>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -352,7 +366,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>板栗仁 · KeyboardGlass 0.5.2</string>
+			<string>板栗仁 · KeyboardGlass 0.6.0</string>
 		</dict>
 	</array>
 	<key>title</key>

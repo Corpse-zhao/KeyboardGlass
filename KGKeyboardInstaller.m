@@ -311,8 +311,26 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 @property (nonatomic, strong) NSMapTable<UIView *, NSNumber *> *hiddenBackdrops;
 // v0.4.1: 锁定的**唯一**一层背景 (批量隐藏会让键盘哑掉, 见 KG_TOUCH_LESSON)
 @property (nonatomic, weak)   UIView *cachedBackdrop;
+// v0.6.0: 按键区自带的那层底色。与 cachedBackdrop 是**两件不同的事**, 见
+// enforceKeyplaneBackdropInHost:。
+//
+// 【为什么是数组而不是单个 weak 视图 —— 探针实锤】
+// v0.6.0 初版写的是 `@property (weak) UIView *cachedKeyplaneBackdrop`, 配合
+// 「BFS 找面积最大的一层」。看完 2026-10-02 13:48 的稳定态全树才发现这是错的:
+//   UIKBKeyplaneView {{0,0},{430,243}}
+//     UIKBSplitImageView {{0,0},{430,243}} h=1  -> UIImageView   ← 面积并列最大
+//     UIKBSplitImageView {{0,0},{430,243}} h=0  -> UIImageView   ← 真正在显示的那张
+//     UIKBSplitImageView {{0,0},{430,243}} h=0  -> UIImageView
+//     UIKBKeyView x5
+// **三张 SplitImageView 面积完全相同**, 「挑最大的」只能靠遍历顺序碰运气,
+// 而第一张恰好 h=1(隐藏) —— 挑中它 = 调淡一个看不见的东西 = 用户看到的
+// 「还是没变化」。所以必须**整组收集、全部调淡**, 一个都不能漏。
+@property (nonatomic, strong) NSMutableArray<UIView *> *cachedKeyplaneBackdrops;
 @property (nonatomic, assign) BOOL hasAppliedStyle;
 @property (nonatomic, assign) KGStyle appliedStyle;
+// v0.6.0: 上一次处理的工作模式。restoreNativeBackdrops 只在它变化时调一次,
+// 避免「每次 layout 都恢复 -> 每次都重扫整棵树」。见 kg_refreshWithHost: 里的说明。
+@property (nonatomic, assign) KGWorkMode lastAppliedMode;
 @property (nonatomic, assign) BOOL didDumpStableTree;
 @property (nonatomic, assign) BOOL didRunTouchDiag;
 @property (nonatomic, copy)   NSString *lastProbeSignature;
@@ -416,6 +434,9 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         self.hostView = host;
         [self.glassView removeFromSuperview];
         [self restoreNativeBackdrops];
+        // 换宿主时强制让下面那一次「模式变化检查」成立 —— 新宿主上的旧缓存
+        // (底板层/背景层) 全部属于上一棵子树, 必须重新选。
+        self.lastAppliedMode = (KGWorkMode)-1;
         self.glassView.hidden = YES;
 
         KGDumpHostChildren(host, mode == KGWorkModeProbe ? @"锁定宿主(纯探针)" : @"锁定宿主");
@@ -427,15 +448,37 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         KGLog(@"工作模式降到 %ld, 撤掉已插入的玻璃", (long)mode);
         [self.glassView removeFromSuperview];
     }
-    // 从「藏背景」切到更低档时, 必须恢复原生背景
-    if (!KGModeHidesBackdrop(mode)) {
+
+    // 从「藏背景 / 调淡底板」切到更低档时, 必须恢复原生背景。
+    //
+    // 【v0.6.0 修: 原来这里是「每次 layout 都恢复」, 是性能与正确性双 bug】
+    // 后果: 在「③ 只插玻璃层」档下, 每一次 layoutSubviews 都会
+    //   restoreNativeBackdrops -> 清空 hiddenBackdrops + 清空 cachedKeyplaneBackdrops
+    // 然后紧接着的 enforceKeyplaneBackdropInHost: 又得**整棵重扫**(上限 500 节点)
+    // 重新选一遍底板。键盘动画期间 layoutSubviews 每秒能走几十次, 等于每秒几十次
+    // 全树 BFS —— 这正是 v0.4.0 记过的「重扫有可能选中另一层 / 把键盘搞死」。
+    // 而且更隐蔽的是: 恢复时 alpha 会被写回原值, 下一帧又调淡,
+    // 观感上就是**底色按帧闪烁**。
+    //
+    // 修法: restoreNativeBackdrops **只在模式真的变了的那一帧调一次**。
+    // 模式没变就说明本轮仍然在藏/在调淡, enforce 会持续维持, 不需要恢复。
+    // 换宿主的情况在上面 self.hostView != host 分支里已经恢复过了, 不重复。
+    if (mode != self.lastAppliedMode) {
         [self restoreNativeBackdrops];
+        self.lastAppliedMode = mode;
     }
 
     if (KGModeShowsGlass(mode)) {
         [self placeGlassInHost:host];
         self.glassView.hidden = NO;
         [self applyStyleForMaterial:material];
+    }
+
+    // v0.6.0: 按键区底色调淡是**独立于「藏背景」**的一件事, 所以 Glass 档也做。
+    // 「藏背景」是 Hide/Full 档的事 (v0.4.1 起刻意解耦, 用于二分隔离);
+    // 「调淡按键区底色」则是让按键区变玻璃的必要步骤, 只要玻璃在就该做。
+    if (KGModeShowsGlass(mode) || KGModeHidesBackdrop(mode)) {
+        [self enforceKeyplaneBackdropInHost:host];
     }
 
     if (KGModeHidesBackdrop(mode)) {
@@ -600,19 +643,106 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     return best;
 }
 
+// 找出**按键区自带的那些不透明底板层**, 整组返回。
+//
+// 【v0.6.0 新增, 「按键区不透明」的唯一解法】
+//
+// 用户的原话是「按键区不透明」。这是一个**独立于玻璃插入位置**的问题:
+// 按键区容器 (_UIKBCompatInputView) 子树里压着一层不透明底板, 而它:
+//   1) 类名里既没有 "Backdrop" 也不带 backgroundColor -> backdropInHost: 选不中
+//   2) 面积跟整个按键区一样大, 且压在玻璃层**上面**
+// 于是玻璃插在按键之下时, 键缝透出玻璃, 按键区自己那块实色仍然盖在玻璃上 ——
+// 观感就是「背景变了, 按键区没变」。v0.4.2 就记过这件事, 一直没解决。
+//
+// 【为什么用「整组」而不是「挑一层」—— 探针实锤, 别再改回去】
+// 2026-10-02 13:48 稳定态全树 (a=alpha h=hidden bg=backgroundColor):
+//   _UIKBCompatInputView {{0,45},{430,243}} bg=-
+//     UIKeyboardAutomatic -> UIKeyboardImpl -> UIKeyboardLayoutStar
+//       UIKBKeyplaneView {{0,0},{430,243}} bg=-
+//         UIKBSplitImageView {{0,0},{430,243}} h=1  -> UIImageView
+//         UIKBSplitImageView {{0,0},{430,243}} h=0  -> UIImageView
+//         UIKBSplitImageView {{0,0},{430,243}} h=0  -> UIImageView
+//         UIKBKeyView x5
+// 三个关键事实:
+//   a) 从容器到 Keyplane, **每一层 bg=-**, 一层背景色都没有
+//      —— 说明按键区的实色是**画出来的**(SplitImageView 里的 UIImageView),
+//         不是 backgroundColor。这也解释了为什么「藏 backgroundColor」这条路
+//         注定无效: 根本没有 backgroundColor 可藏。
+//   b) **三张 SplitImageView 面积完全相同**(都 430x243), 「挑面积最大的」
+//      等于靠遍历顺序碰运气, 而第一张 h=1 是隐藏的 —— 挑中它就等于什么都没做。
+//   c) 它们是 **UIKBKeyView 的兄弟**, 不是按键的祖先
+//      —— 所以调淡它们的 alpha 不会连带把按键调淡, 触摸也不受影响
+//         (UIKBKeyView 自己 uie=0, 真实触摸由系统自己在更低层处理)。
+//
+// 【为什么不用「把玻璃盖到按键之上」那个办法 —— 它已被实测否掉两次】
+// v0.2.0 (纯 CALayer) 和 v0.5.2 (UIView + userInteractionEnabled=NO) 两次实测
+// 「打开就不能打字」。所以 v0.6.0 **彻底删掉 GlassOverKeys 开关**。
+// 正确做法是反过来: **玻璃留在按键之下(安全), 单独把那层底色调淡**。
+//
+// 判据: 在按键区容器子树里, 找**不含按键内容**、且面积 >= 按键区 60% 的层, 全都要。
+- (NSArray<UIView *> *)keyplaneBackdropsInHost:(UIView *)host {
+    UIView *keyLayer = [self firstKeyLayerInHost:host];
+    if (!keyLayer) return @[];
+
+    // 按键区的顶层容器 = 按键层在宿主下的那个祖先
+    UIView *keyContainer = [self ancestorOf:keyLayer under:host];
+    if (!keyContainer) return @[];
+
+    CGFloat containerArea = keyContainer.frame.size.width * keyContainer.frame.size.height;
+    if (containerArea <= 0) return @[];
+
+    NSMutableArray<UIView *> *found = [NSMutableArray array];
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:keyContainer];
+    NSUInteger guard = 0;
+    while (queue.count > 0 && guard++ < 500) {
+        UIView *current = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if (!current) continue;
+
+        // 容器自己不算 —— 要找的是容器**里面**那些底板
+        if (current != keyContainer) {
+            // 肚子里有按键的一律不能碰: 那可能是按键的包装层, 调淡了按键跟着淡
+            if (!KGContainsKeyboardContent(current, 0)) {
+                CGFloat area = current.frame.size.width * current.frame.size.height;
+                // 面积门槛: 只处理跟按键区差不多大的那些层, 排除零碎小色块
+                if (area >= containerArea * 0.6) {
+                    [found addObject:current];
+                }
+                continue;   // 命中即止, 不往里钻 (底板层自己肚子里不会有第二层底板)
+            }
+        }
+        [queue addObjectsFromArray:current.subviews];
+    }
+    return found;
+}
+
 #pragma mark - 安装与拆卸
 
 // 把玻璃视图插到宿主里。**是 subview, 不是 layer。**
 //
-// 【v0.5.0 架构变更】旧版挂 CALayer, 理由是「hitTest 只遍历 view, layer 不可能挡触摸」。
-// 那个理由本身没错, 但代价太大: CALayer 的 backdrop 采不到别的窗口的内容,
-// 玻璃等于全透明。现在换成 UIVisualEffectView (系统键盘同款机制), 跨窗口有效。
-// 触摸安全改由 KGGlassView 内部显式 userInteractionEnabled=NO 保证 ——
-// 那是 UIKit 层面有明确契约的行为, 比「layer 天生不参与命中」更硬。
 //
-// 【z 序】由设置项 GlassOverKeys 控制:
-//   NO  (默认) = 插在按键之下 -> 键缝透出玻璃, 按键区保持原样, 稳
-//   YES         = 插在按键之上 -> 整块键盘都成玻璃, 就是 iOS 26 那个观感
+// 把玻璃视图插到宿主里。**永远在按键之下, 没有例外。**
+//
+// 【v0.6.0 重大简化】v0.4.2~v0.5.2 有一个 GlassOverKeys 开关, 控制玻璃插在
+// 按键之下还是之上。这个方向**已被实测否掉两次**:
+//   v0.2.0 (纯 CALayer):     打开就「打不了字」
+//   v0.5.2 (UIView + uie=NO): 打开仍然「打不了字」
+// 两次架构完全不同, 结论却一样 —— 说明「玻璃盖住按键」这条路本身走不通,
+// 不是某一行实现写错了。所以 v0.6.0 把这个开关整个删掉, 不再试第三遍。
+//
+// 【那「按键区不透明」怎么办】—— 换方向解决:
+//   玻璃留在按键之下(安全, 实测能打字), 单独把按键区自带的那层不透明底色调淡。
+//   按键自己还在, 只是它脚下的底色透明了, 玻璃从键缝透上来。
+//   见 keyplaneBackdropInHost:。
+//
+// 【为什么「显式 userInteractionEnabled=NO」也挡不住】—— 写清楚, 免得以后
+// 又有人拿「机制上不可能」当依据:
+//   UIKit 确实保证 hitTest 跳过 uie=NO 的视图。但 iOS 键盘的触摸**不完全走
+//   UIView 的 hitTest 派发** —— v0.2.2 早就实测到「键盘区域 hitTest 全部返回
+//   nil」, 说明系统另有路由。既然如此, 玻璃插在按键**上方**时, 玻璃的模糊/
+//   遮罩效果本身就会改变系统对按键的命中判定 (屏幕上「点在玻璃上」,
+//   系统据此找不到下层按键)。
+//   **「机制上不可能」不等于「实测不会」—— 这已经是第三次栽在这句话上。**
 - (void)placeGlassInHost:(UIView *)host {
     if (!self.glassView) {
         self.glassView = [[KGGlassView alloc] initWithFrame:host.bounds];
@@ -623,12 +753,11 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         self.glassView.frame = host.bounds;
     }
 
-    BOOL overKeys = [KGPrefs glassOverKeys];
     UIView *fg = [self firstKeyLayerInHost:host];
 
     // 【v0.4.3 铁律, 继续生效】找不到按键层 = 不知道玻璃该插在哪, 绝不能插。
     // 旧代码让 target 停在 0, 结果插到最底层压在按键上面, 用户实测打不了字。
-    if (!fg && !overKeys) {
+    if (!fg) {
         if (self.glassView) {
             [self.glassView removeFromSuperview];
             self.glassView.hidden = YES;
@@ -639,51 +768,35 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     // insertSubview:belowSubview: 要求 sibling 关系。fg 可能是宿主的孙辈,
     // 直接用它会抛异常 —— 必须先取它在宿主下的那个祖先。
     UIView *anchor = fg ? [self ancestorOf:fg under:host] : nil;
-    if (!anchor && !overKeys) {
+    if (!anchor) {
         if (self.glassView.superview) [self.glassView removeFromSuperview];
         self.glassView.hidden = YES;
         return;
     }
 
     if (self.glassView.superview != host) {
-        if (overKeys || !anchor) {
-            [host addSubview:self.glassView];
-        } else {
-            [host insertSubview:self.glassView belowSubview:anchor];
-        }
-        KGLog(@"玻璃视图入位: overKeys=%d host=%@ subviews=%lu anchor=%@",
-              overKeys ? 1 : 0, NSStringFromClass(host.class),
-              (unsigned long)host.subviews.count,
-              anchor ? NSStringFromClass(anchor.class) : @"none(置顶)");
+        [host insertSubview:self.glassView belowSubview:anchor];
+        KGLog(@"玻璃视图入位: host=%@ subviews=%lu anchor=%@",
+              NSStringFromClass(host.class), (unsigned long)host.subviews.count,
+              NSStringFromClass(anchor.class));
         return;
     }
 
     // 已在宿主里: 平时绝不动它 (避免触发布局反馈循环), 只在 z 序与目标不符时纠正。
-    // 必须**每次都校正** —— 用户随时可能切这个开关, 键盘重建后 subviews 也会变,
-    // 一次性纠正会被这些变化打失效。
     NSUInteger currentIndex = [host.subviews indexOfObject:self.glassView];
     if (currentIndex == NSNotFound) return;
 
-    NSInteger targetIndex;
-    if (overKeys || !anchor) {
-        targetIndex = (NSInteger)host.subviews.count - 1;
-    } else {
-        targetIndex = (NSInteger)[host.subviews indexOfObject:anchor];
-        if (targetIndex == (NSInteger)NSNotFound) return;
-    }
+    NSInteger targetIndex = (NSInteger)[host.subviews indexOfObject:anchor];
+    if (targetIndex == (NSInteger)NSNotFound) return;
     if (targetIndex < 0) targetIndex = 0;
     if (targetIndex > (NSInteger)host.subviews.count - 1) {
         targetIndex = (NSInteger)host.subviews.count - 1;
     }
 
     if ((NSInteger)currentIndex != targetIndex) {
-        KGLog(@"玻璃视图 z 序需纠正: %lu -> %ld (overKeys=%d)",
-              (unsigned long)currentIndex, (long)targetIndex, overKeys ? 1 : 0);
-        if (overKeys || !anchor) {
-            [host addSubview:self.glassView];
-        } else {
-            [host insertSubview:self.glassView belowSubview:anchor];
-        }
+        KGLog(@"玻璃视图 z 序需纠正: %lu -> %ld",
+              (unsigned long)currentIndex, (long)targetIndex);
+        [host insertSubview:self.glassView belowSubview:anchor];
     }
 }
 
@@ -738,6 +851,68 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     if (fabs(bg.alpha - target) > 0.001) {
         bg.alpha = target;
     }
+    // v0.6.0: 按键区底色的调淡**不在这里**做 —— 它是独立的一件事, 由
+    // enforceKeyplaneBackdropInHost: 负责, 且 Glass 档也要做。
+}
+
+// 调淡按键区自带的那些底板层 —— 「按键区不透明」的解法。
+//
+// v0.6.0 新增。这个与上面藏主体背景是**两件不同的事**:
+//   主体背景 (UIKBBackdropView)  = 键盘整体那块底, 藏掉它玻璃能透出 App
+//   按键区底板 (SplitImageView)   = 按键区自己脚下那块, 调淡它按键区才变玻璃
+// 用户反馈「按键区不透明」指的是**后者**, v0.4.2 就记录过这个问题, 一直没解决。
+//
+// 【为什么用「调淡」而不是「藏掉」】—— 藏掉(alpha=0)实测会哑掉触摸
+// (v0.4.0「又不能点击了」)。调淡成 0.25 而不是 0: 视觉上足够透
+// (玻璃能透上来), 但整棵子树仍在, 按键照常响应。
+//
+// 【为什么可以整组一起调】—— 探针实锤这三张 SplitImageView 是 UIKBKeyView 的
+// **兄弟**而不是祖先, 所以调淡它们不会连带调淡按键, 也不影响按键的触摸。
+- (void)enforceKeyplaneBackdropInHost:(UIView *)host {
+    if (!self.hiddenBackdrops) {
+        self.hiddenBackdrops = [NSMapTable weakToStrongObjectsMapTable];
+    }
+
+    // 整组重选的条件: 从没选过, 或者**任何一个**离树了(键盘重建会换一批视图)。
+    // 少了「任何一个」这个条件就会漏 —— 三张图可能只重建了两张。
+    BOOL needReselect = NO;
+    if (!self.cachedKeyplaneBackdrops) {
+        needReselect = YES;
+    } else {
+        for (UIView *v in self.cachedKeyplaneBackdrops) {
+            if (!v.superview) { needReselect = YES; break; }
+        }
+    }
+
+    if (needReselect) {
+        self.cachedKeyplaneBackdrops = [[self keyplaneBackdropsInHost:host] mutableCopy];
+        for (UIView *v in self.cachedKeyplaneBackdrops) {
+            [self.hiddenBackdrops setObject:@(v.alpha) forKey:v];
+        }
+        if (self.cachedKeyplaneBackdrops.count > 0) {
+            KGLog(@"锁定按键区底板 %lu 层: %@",
+                  (unsigned long)self.cachedKeyplaneBackdrops.count,
+                  [[self.cachedKeyplaneBackdrops valueForKey:@"class"] componentsJoinedByString:@","]);
+        } else {
+            KGLog(@"没找到可调淡的按键区底板层");
+        }
+    }
+
+    // 0 = 完全不动 (保持系统原样), 1 = 只留 15% 底色保证字看得清
+    CGFloat strength = [KGPrefs keyplaneDim];
+    for (UIView *kb in self.cachedKeyplaneBackdrops) {
+        if (!kb.superview) continue;
+        NSNumber *origin = [self.hiddenBackdrops objectForKey:kb];
+        if (!origin) continue;
+
+        CGFloat target = origin.doubleValue;
+        if (strength > 0.001) {
+            target = origin.doubleValue * (1.0 - MIN(0.85, strength));
+        }
+        if (fabs(kb.alpha - target) > 0.001) {
+            kb.alpha = target;
+        }
+    }
 }
 
 - (void)applyStyleForMaterial:(KGMaterial)material {
@@ -771,6 +946,19 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
            bgOrigin ? bgOrigin.doubleValue : -1.0, bg.alpha]
         : @"none";
 
+    // v0.6.0: 按键区底板层的状态。「按键区不透明」就看这一行 ——
+    // keyBg= 不是 none 说明找到了并调淡了, 还是 none 说明压根没找到那层底板。
+    // 探针实锤是整组(3 张 UIKBSplitImageView), 所以这里报**逐层**明细,
+    // 而且带 h= —— 因为其中一张 h=1, 只报「找到 1 层」会误判成没生效。
+    NSMutableString *kbDesc = [NSMutableString string];
+    for (UIView *kb in self.cachedKeyplaneBackdrops) {
+        NSNumber *kbOrigin = [self.hiddenBackdrops objectForKey:kb];
+        [kbDesc appendFormat:@"%@(%@,origin=%.2f,now=%.2f,h=%d) ",
+           NSStringFromClass(kb.class), NSStringFromCGRect(kb.frame),
+           kbOrigin ? kbOrigin.doubleValue : -1.0, kb.alpha, kb.hidden ? 1 : 0];
+    }
+    if (kbDesc.length == 0) [kbDesc appendString:@"none"];
+
     // 玻璃正下方那三层是谁 —— 玻璃是 backdrop, 采样源就在它下面。
     // 如果这几层里有东西仍然不透明, 玻璃就采不到键盘外面的画面。
     //
@@ -793,17 +981,23 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     }
     if (underDesc.length == 0) [underDesc appendString:@"none"];
 
-    NSString *signature = [NSString stringWithFormat:@"%@|%@|%@|%ld|%ld|%ld|%ld",
+    // signature 要把底板层数和真实 alpha 都算进去: v0.6.0 之前只记了类名,
+    // 结果「3 张图里只调淡了 1 张」这种状态探针完全看不出来(签名没变就不重写)。
+    NSString *signature = [NSString stringWithFormat:@"%@|%@|%@|%ld|%ld|%ld|%ld|%@|%.3f|%lu|%.3f",
         NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
         bg ? NSStringFromClass(bg.class) : @"none",
-        (long)vi, (long)li, (long)fi, (long)mode];
+        (long)vi, (long)li, (long)fi, (long)mode,
+        kbDesc, bg.alpha,
+        (unsigned long)self.cachedKeyplaneBackdrops.count, [KGPrefs keyplaneDim]];
     if ([signature isEqualToString:self.lastProbeSignature]) return;
     self.lastProbeSignature = signature;
     if (self.probeCount++ > 60) return;
 
     KGWriteProbe([NSString stringWithFormat:
-        @"[install %@] mode=%ld host=%@ hostFrame=%@ onScreen=%d glassViewIdx=%ld/%lu glassLayerIdx=%ld/%lu fg=%@ subIdx=%ld fgDepth=%ld hiddenBg=%@\n"
-        @"         blurStyle=%.1f effect=%ld refraction=%.1f highlight=%.2f veil=%.2f radius=%.1f outline=%d material=%ld dark=%d\n"
+        @"[install %@] mode=%ld host=%@ hostFrame=%@ onScreen=%d glassViewIdx=%ld/%lu glassLayerIdx=%ld/%lu fg=%@ subIdx=%ld fgDepth=%ld\n"
+        @"         blurStyle=%.1f effect=%ld refraction=%.1f highlight=%.2f veil=%.2f radius=%.1f outline=%d material=%ld dark=%d keyDim=%.2f\n"
+        @"         hiddenBg=%@\n"
+        @"         keyBg=%@\n"
         @"         underGlass=%@\n",
         [NSDate date], (long)mode,
         NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
@@ -811,13 +1005,12 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         (long)vi, (unsigned long)host.subviews.count,
         (long)li, (unsigned long)host.layer.sublayers.count,
         fg ? NSStringFromClass(fg.class) : @"none", (long)fi, (long)KGDepthOfView(fg, host),
-        bgDesc,
         self.appliedStyle.blur, (long)self.glassView.activeEffectStyle,
         self.appliedStyle.refraction,
         self.appliedStyle.highlight, self.appliedStyle.veil,
         self.appliedStyle.cornerRadius, [KGPrefs showLayerOutline],
-        (long)material, self.appliedStyle.dark,
-        underDesc]);
+        (long)material, self.appliedStyle.dark, [KGPrefs keyplaneDim],
+        bgDesc, kbDesc, underDesc]);
 }
 
 - (void)restoreNativeBackdrops {
@@ -831,6 +1024,9 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     }
     [self.hiddenBackdrops removeAllObjects];
     self.cachedBackdrop = nil;
+    // v0.6.0: 按键区底板也要清, 否则它留在缓存里, 下次切档时 enforce 会拿
+    // 一批已经不在树上的旧层去写 alpha —— 轻则没效果, 重则报错。
+    self.cachedKeyplaneBackdrops = nil;
 }
 
 - (void)teardown {
@@ -841,6 +1037,9 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     }
     [self restoreNativeBackdrops];
     self.hostView = nil;
+    // 强制下次进来时重新走一遍「模式变化 -> 恢复 -> 重选」, 避免拿旧缓存的层
+    // 去写 alpha(teardown 之后视图已经被系统回收了)。
+    self.lastAppliedMode = (KGWorkMode)-1;
 }
 
 #pragma mark - 兜底路径 (宿主类名不认识时)
