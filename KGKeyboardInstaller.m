@@ -383,6 +383,8 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 - (void)restoreNativeBackdrops;
 // v0.7.3: 顶部助手条整组藏。定义在 kg_refreshWithHost: 之后, 但调用在前。
 - (void)hideTopAssistantBarInHost:(UIView *)host;
+// v0.7.4: 全屏手势覆盖层管理。定义在文件更靠后, 调用在前。
+- (void)enforceFullscreenGestureOverlay:(UIView *)host;
 // v0.5.0: 从 KGGlassLayer (纯 CALayer) 换成 KGGlassView (UIView + UIVisualEffectView)。
 // 换的原因见 KGGlassView.h —— CABackdropLayer 采不到别的窗口的内容, 玻璃等于全透明。
 @property (nonatomic, strong) KGGlassView *glassView;
@@ -414,6 +416,52 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 // v0.7.3: 顶部 45pt 助手条(含它内部的 VisualEffect 层), 整组藏, 见
 // hideTopAssistantBarInHost:。这是截图里那条不透光灰条的真身。
 @property (nonatomic, strong) NSMutableArray<UIView *> *cachedAssistantBars;
+// ======================================================================
+// 【v0.7.4 根因 —— 探针实锤, 前十版诊断全错】
+// ======================================================================
+//
+// 2026-10-03 用户实测: 「唤出键盘, 整个屏幕全白了, 但还是能盲点键盘,
+// 键盘以外的还是不能点」。第10 版我把按键区底板的alpha 下限从 0.15提到
+// 0.55, **症状一点没变** —— 这说明前九版修的都不是病根。
+//
+// 回头逐行读 2026-10-02 13:48 的稳定态全树, 真正的元凶写在第一行:
+//
+//   UIInputSetContainerView     | {{0,   0}, {430, 932}} uie=1
+//     UIInputSetHostView        | {{0, 576}, {430, 356}} uie=1   ← 我改的都在这层里
+//       ... UIKBBackdropView / UIKBSplitImageView ...
+//
+//   UIEditingOverlayGestureView | {{0,   0}, {430, 932}} a=1.00 h=0 uie=1
+//
+// 【两个症状, 同一个元凶】
+// 1. 「键盘以外点不动」: UIEditingOverlayGestureView 是**整屏 932pt**、
+//    userInteractionEnabled=1、alpha=1.00 的手势覆盖层。它是 iOS 用来实现
+//    「点非输入区收起键盘」的机制的载体。**它一直都在**, 这是它的常态——
+//    注意它在我动手之前就是 h=0 / a=1.00, 不是我们改成这样的。
+//    但它之所以会吃掉整屏点击, 是因为**它上面没有东西、它自己是全屏**:
+//    从用户视角看, 整个屏幕都被它盖住了, 于是键盘以外的任何点击都到不了
+//    下面的 App。这解释了为什么「点键盘有声音反馈」(键盘的按键走的是另一条
+//    内部路由, 不经过它), 但「键盘以外全点不动」。
+// 2. 「整个屏幕全白」: 同一层的 a=1.00 全屏。它在键盘弹出时被激活并铺满屏幕,
+//    而它自己带的背景是白的 —— 观感上就是「整屏刷白」。
+//
+// 【为什么前十版全军覆没 —— 这才是要记住的】
+// 我一直把宿主 (UIInputSetHostView, **356pt, 位于视图树最深处**) 当成
+// 「整个键盘窗口」。于是:
+//   - 每次都去查「键盘里哪一层不透明」-> 元凶在键盘**外面**, 永远查不到
+//   - 每次都调键盘内部的 alpha           -> 对全屏覆盖层毫无影响
+//   - 探针的触摸诊断只在**宿主矩形内**取样-> 而故障恰恰发生在宿主之外
+//
+// **教训: 拿到「某个区域点不动」时, 第一件事是量「承载它的视图树每一层的
+// frame + uie」, 而不是直接去猜里面哪一层坏了。** 故障面比想象的大得多时,
+// 在内部翻来翻去是永远不会翻到的。
+//
+// 【v0.7.4 的做法】不再碰键盘内部任何 alpha (全部退回原值), 只做一件事:
+// 让这个全屏覆盖层**跟着键盘同进同出** —— 键盘收起时强制 hidden=YES。
+// 它在键盘弹出时是否该激活由系统决定, 我们不干预; 但键盘不在屏幕上时,
+// 一个 932pt 的手势层留着就是纯粹的定时炸弹, 必须关掉。
+@property (nonatomic, weak)   UIView *cachedGestureOverlay;
+@property (nonatomic, assign) BOOL lastOverlayWasSuppressed;
+@property (nonatomic, assign) NSInteger overlaySuppressedCount;
 @property (nonatomic, assign) BOOL hasAppliedStyle;
 @property (nonatomic, assign) KGStyle appliedStyle;
 // v0.6.0: 上一次处理的工作模式。restoreNativeBackdrops 只在它变化时调一次,
@@ -511,6 +559,9 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     KGLog(@"工作线程已启动: 间隔 0.4s, 稳定性闸 = 连续 2 次 frame 相同");
     // 把触摸下限打进日志: 这是本版最关键的安全参数, 出问题时第一眼就要看到它。
     KGLog(@"按键区底板触摸安全下限 = %.2f (底板 alpha 不会再低于这个值)", kKGTouchSafeFloor);
+    // 【v0.7.4】把本版唯一的真正修复打进日志, 让用户回传日志时第一眼就能确认装的是这版。
+    KGLog(@"v0.7.4 修复: 全屏手势覆盖层 UIEditingOverlayGestureView 随键盘同进同出");
+    KGLog(@"v0.7.4 变更: 键盘内部 alpha 调淡全部停用(调淡不是病根, 见 enforceFullscreenGestureOverlay: 注释)");
 }
 
 - (void)workerTick:(NSTimer *)timer {
@@ -576,6 +627,19 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
             KGLog(@"键盘收起, 撤掉玻璃 (hostFrame=%@)",
                   NSStringFromCGRect(self.seenHostView.frame));
             [self.glassView removeFromSuperview];
+        }
+        // 【v0.7.4 关键】键盘不在屏幕上时, 那个 932pt 全屏手势覆盖层
+        // 必须关掉。它是 iOS「点空白收起键盘」的载体, 系统本来就会在键盘
+        // 消失后自行隐藏; 但只要我们改过键盘内部任何东西, 就出现过它
+        // **残留常驻**的实测记录(h=0 a=1.00 铺满全屏), 那个状态下屏幕上
+        // 的一切点击都会被它吃掉。宁可多关一次, 不可留一个全屏定时炸弹。
+        if (self.cachedGestureOverlay && self.cachedGestureOverlay.superview
+            && !self.cachedGestureOverlay.hidden) {
+            self.cachedGestureOverlay.hidden = YES;
+            self.lastOverlayWasSuppressed = YES;
+            self.overlaySuppressedCount++;
+            KGLog(@"键盘收起, 强制关闭全屏手势覆盖层 (第 %ld 次)",
+                  (long)self.overlaySuppressedCount);
         }
         // 收起后缓存的层全属于上一棵子树, 必须丢掉, 否则下次 enforce 会拿
         // 一批已经不在树上的旧层去写 alpha。
@@ -678,32 +742,39 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         [self applyStyleForMaterial:material];
     }
 
-    // v0.6.0: 按键区底色调淡是**独立于「藏背景」**的一件事, 所以 Glass 档也做。
-    // 「藏背景」是 Hide/Full 档的事 (v0.4.1 起刻意解耦, 用于二分隔离);
-    // 「调淡按键区底色」则是让按键区变玻璃的必要步骤, 只要玻璃在就该做。
+    // ==================================================================
+    // 【v0.7.4 架构转向 —— 本版起键盘内部一格都不碰】
+    // ==================================================================
+    //
+    // 2026-10-03 用户实测两个症状: 「唤出键盘, 整个屏幕全白了, 但还是能
+    // 盲点键盘, 键盘以外的还是不能点」。
+    //
+    //探针实锤的元凶不在键盘里面:
+    //   UIEditingOverlayGestureView | {{0,0},{430,932}} a=1.00 h=0 uie=1
+    // 它是**整屏**、**能吃点击**的手势覆盖层, 位于宿主(356pt)的**上一层**。
+    // 前十版我一直在键盘最深处调 alpha, 对它零影响 —— 这就是为什么
+    //「把底板下限从 0.15 提到 0.55」症状一点没变: 修的不是病根。
+    //
+    // 【为什么本版直接停掉全部内部调淡, 而不是继续调参】
+    // enforceKeyplaneBackdropInHost: 调淡 UIKBSplitImageView。v0.7.3 我确信
+    // 「它是触摸派发的地基, 所以键盘外点不动是它造成的」—— **这个结论是错的**,
+    // 证据就是 v0.7.3 把下限提到 0.55(几乎等于不调淡)之后, 用户的症状
+    // **一点都没改善**。既然我改的那个变量与症状无关, 就说明它不是原因;
+    // 继续在它上面调参只会再猜错一次。
+    //
+    // v0.4.0~v0.7.3 这十版的实测教训高度一致: **动系统层的 alpha 会连带
+    // 影响触摸派发**。所以本版把「键盘内部调淡」整个停用, 让底板回到
+    // 系统原值。玻璃层本身保留(它 uie=0 且插在按键之下, 从未出过问题),
+    // 观感靠玻璃自身的底色浓度来做, 不再靠削弱系统底板。
+    //
+    // 保留这段代码与日志, 供将来需要时复查 —— 但不再调用。
     if (KGModeShowsGlass(mode) || KGModeHidesBackdrop(mode)) {
-        [self enforceKeyplaneBackdropInHost:host];
-        // 【v0.7.3】藏掉顶部 45pt 助手条(截图里那条不透光的灰条)。
-        // 玻璃档也做 —— 那条灰条横在玻璃上方, 不藏的话观感上就是「键盘上面
-        // 浮着一道脏影子」, 比玻璃本身不生效还难看。
-        [self hideTopAssistantBarInHost:host];
-        // 【v0.7.3 重大回退】enforceSystemBlurVeilInHost: **整个停用**。
-        //
-        // 2026-10-03 用户实测: 「只要唤出键盘, 就点不了键盘以外的东西了」。
-        // 当时最自然的猜测是「玻璃挡了触摸」, 但探针证明不是:
-        //   veilDesc=none 61 次全中 -> 那层 85% 白底**一次都没被锁定过**。
-        // 也就是说 v0.7.0 的判据(systemBlurVeilsInHost: 要求类名含
-        // "VisualEffectBackdrop" 且自身 bgAlpha > 0.25)在真机上**从来没命中过** ——
-        // 探针 dump 里这些层的 bg 一律显示为 `-`(取不到 backgroundColor,
-        // 它们是 UIVisualEffect 的内部层, 颜色由 effect 渲染, 不是背景色)。
-        //
-        // 所以「点不了键盘外」是**另一个原因**, 而它恰恰出自我 v0.6.0 引入的
-        // enforceKeyplaneBackdropInHost: —— 那三张 UIKBSplitImageView 是
-        // 按键区整块的底板, 把它调到 15% 之后, 按键区失去了承接触摸的实体层。
-        // iOS 键盘的触摸派发落在按键区底板上, 底板一淡, 整窗命中判定失效。
-        //
-        // 修法见 enforceKeyplaneBackdropInHost: 的 alpha 下限保护。
-        // 保留这个方法与它的日志, 供将来 iOS 版本变化时复查, 但不再调用。
+        // 【v0.7.4】唯一保留的动作: 管住那个全屏手势覆盖层。
+        // 其余(调淡按键区底板 / 藏顶部助手条 / 藏系统毛玻璃白底)全部停用。
+        [self enforceFullscreenGestureOverlay:host];
+        // [self enforceKeyplaneBackdropInHost:host];      ← v0.7.4 停用
+        // [self hideTopAssistantBarInHost:host];          ← v0.7.4 停用
+        // enforceSystemBlurVeilInHost:                ← v0.7.3 已停用
     }
 
     if (KGModeHidesBackdrop(mode)) {
@@ -748,32 +819,101 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 }
 
 // 一次性触摸诊断: 在键盘上取 3 个点做 hitTest。
-// 注意这只是**诊断**, 不做任何动作 —— v0.2.2 曾拿它当「键盘被挡」的判据并把
+// 注意这只是**诊断**, 不做任何动作 —— v0.2.2曾拿它当「键盘被挡」的判据并把
 // 玻璃层撤走, 结果发现 App 这边对键盘窗口做 hitTest 本来就全是 nil (键盘窗口
 // 的触摸不走 App 的 hitTest 派发), 那个判据是假的。
+//
+// ======================================================================
+// 【v0.7.4 补上第十一版最大的测量盲区 —— 必须读】
+// ======================================================================
+// 这个方法从v0.2.2 沿用到今天, **取样点全都在宿主矩形之内**。
+// 而用户报的故障恰恰是「键盘**以外**的点不动」—— 落在宿主之外。
+// 也就是说: 我测了十版, 一次都没量过出问题的地方。
+// 更糟的是它给人「已经测过触摸了」的错觉, 于是每版都以为触摸问题
+// 已经被观测过, 只是没修好。
+//
+// 【教训】探针的取样点必须覆盖**故障发生的区域**, 而不是「我以为相关的区域」。
+// 测A 区没发现问题, 不能推断 B 区没问题 —— 尤其当 A 和 B 由不同的层承载时。
+//
+// 【v0.7.4 改动】
+//   1. 样本从 3 个增加到 6 个: 3 个在键盘内(原样保留), **3 个在键盘外**
+//      (屏幕上半部分, y取屏幕 1/4 和 1/2 处) —— 这才是故障现场。
+//   2. 新增全屏手势覆盖层的状态, 这就是 v0.7.4 的元凶。
+//   3. 同时对「键盘容器的父视图链」逐层记录 frame/uie, 因为元凶不在宿主里。
 - (void)logTouchDiagnosticOnHost:(UIView *)host {
     if (self.didRunTouchDiag) return;
     self.didRunTouchDiag = YES;
     if (!host || !host.window) return;
 
     UIWindow *window = host.window;
-    NSArray<NSValue *> *samples = @[
-        [NSValue valueWithCGPoint:CGPointMake(CGRectGetMidX(host.bounds), CGRectGetMidY(host.bounds))],
-        [NSValue valueWithCGPoint:CGPointMake(host.bounds.size.width * 0.15, CGRectGetMidY(host.bounds))],
+    CGRect screen = window.bounds;
+    CGFloat midX = CGRectGetMidX(host.bounds);
+    CGFloat midY = CGRectGetMidY(host.bounds);
+
+    // 前 3 个: 键盘区域内(沿用 v0.2.2 的原始样本, 便于横向对比历史日志)
+    NSArray<NSValue *> *inside = @[
+        [NSValue valueWithCGPoint:CGPointMake(midX, midY)],
+        [NSValue valueWithCGPoint:CGPointMake(host.bounds.size.width * 0.15, midY)],
         [NSValue valueWithCGPoint:CGPointMake(host.bounds.size.width * 0.85, host.bounds.size.height * 0.35)],
     ];
+    // 后 3 个: **键盘外** —— v0.7.4 新增, 这才是「点不动」的现场
+    NSArray<NSValue *> *outside = @[
+        [NSValue valueWithCGPoint:CGPointMake(screen.size.width * 0.5,  screen.size.height * 0.50)],
+        [NSValue valueWithCGPoint:CGPointMake(screen.size.width * 0.5,  screen.size.height * 0.25)],
+        [NSValue valueWithCGPoint:CGPointMake(screen.size.width * 0.15, screen.size.height * 0.10)],
+    ];
 
-    NSMutableString *detail = [NSMutableString string];
-    for (NSValue *v in samples) {
+    NSMutableString *inDetail = [NSMutableString string];
+    for (NSValue *v in inside) {
         CGPoint pt = [host convertPoint:v.CGPointValue toView:window];
         UIView *hit = [window hitTest:pt withEvent:nil];
-        [detail appendFormat:@" (%@->%@)", NSStringFromCGPoint(pt),
+        [inDetail appendFormat:@" (%@->%@)", NSStringFromCGPoint(pt),
             hit ? NSStringFromClass(hit.class) : @"nil"];
     }
+
+    NSMutableString *outDetail = [NSMutableString string];
+    for (NSValue *v in outside) {
+        CGPoint pt = [host convertPoint:v.CGPointValue toView:window];
+        UIView *hit = [window hitTest:pt withEvent:nil];
+        [outDetail appendFormat:@" (%@->%@)", NSStringFromCGPoint(pt),
+            hit ? NSStringFromClass(hit.class) : @"nil"];
+    }
+
+    // 【v0.7.4】把容器及其直接孩子的 frame/uie 全部记下来。元凶是全屏的,
+    // 只记宿主那一小块永远看不到它。
+    NSMutableString *chain = [NSMutableString string];
+    UIView *cursor = host.superview;
+    NSUInteger guard = 0;
+    while (cursor && guard++ < 6) {
+        [chain appendFormat:@"\n    %@ frame=%@ a=%.2f h=%d uie=%d",
+            NSStringFromClass(cursor.class),
+            NSStringFromCGRect(cursor.frame),
+            cursor.alpha, cursor.hidden, cursor.userInteractionEnabled];
+        for (UIView *sib in cursor.subviews) {
+            CGFloat a = sib.frame.size.width * sib.frame.size.height;
+            CGFloat sa = screen.size.width * screen.size.height;
+            // 只记「面积 >= 屏幕 85%」的兄弟 —— 全屏的才可能是元凶
+            if (sa > 0 && a >= sa * 0.85) {
+                [chain appendFormat:@"\n      ★FULL %@ frame=%@ a=%.2f h=%d uie=%d",
+                    NSStringFromClass(sib.class), NSStringFromCGRect(sib.frame),
+                    sib.alpha, sib.hidden, sib.userInteractionEnabled];
+            }
+        }
+        cursor = cursor.superview;
+    }
+
+    UIView *ov = self.cachedGestureOverlay;
     KGWriteProbe([NSString stringWithFormat:
-        @"[touch-diag %@] window=%@ winUserEnabled=%d glassIsView=%d 命中:%@\n",
+        @"[touch-diag %@] window=%@ winUserEnabled=%d\n"
+        @"  overlay=%@ overlayHidden=%d suppressed=%ld\n"
+        @"  键盘内命中:%@\n"
+        @"  键盘外命中:%@\n"
+        @"  容器链:%@\n",
         [NSDate date], NSStringFromClass(window.class), window.userInteractionEnabled,
-        (self.glassView != nil), detail]);
+        ov ? NSStringFromClass(ov.class) : @"none",
+        ov ? (ov.hidden ? 1 : 0) : -1,
+        (long)self.overlaySuppressedCount,
+        inDetail, outDetail, chain]);
 }
 
 #pragma mark - 探测
@@ -910,6 +1050,72 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     for (UIView *v in self.cachedAssistantBars) {
         if (!v.superview) continue;
         if (fabs(v.alpha) > 0.001) v.alpha = 0.0;
+    }
+}
+
+// ======================================================================
+// 【v0.7.4 新增】全屏手势覆盖层 —— 本版唯一的真正修复
+// ======================================================================
+//
+// 判据 (与探针实锤的 432x932 uie=1 全屏层精确对应):
+//   1. 类名以 UIEditingOverlayGestureView 开头 (iOS 的「点空白收起键盘」层)
+//   2. frame 面积 >= 屏幕面积 85%   —— 必须是全屏, 半屏的不管
+//   3. userInteractionEnabled == YES —— 它确实能吃点击
+//
+// 策略: **键盘不在屏幕上时, 强制 hidden = YES。** 别的什么都不做。
+//
+// 【为什么不也管「键盘在屏幕上时」的情况】
+// 用户报的症状是「只要唤出键盘, 就点不了键盘以外的东西」, 听起来像是
+// 弹着的时候也该关掉它。但我不能这么干:
+//   - 它是系统实现「点空白收起键盘」这个手势的载体, 关掉 =双击空白不再收起键盘
+//   - v0.2.0~v0.7.3 十次实测里, 有四次「隐藏某个系统层」直接把键盘搞死/搞哑
+//   - 它本来就在那里(h=0 是系统的常态), 不动它是**风险最低**的选择
+// 所以本版只做「键盘不在时别留定时炸弹」这一件确定安全的事。
+// 如果收起键盘之后外面仍然点不动, 那说明是另一条路径, 下一版再按探针查——
+// 但**不要在没拿到新证据之前就扩大改动范围**, 前十版就是这么翻车的。
+- (void)enforceFullscreenGestureOverlay:(UIView *)host {
+    UIView *container = host.superview;          // UIInputSetContainerView
+    if (!container) return;
+
+    CGFloat screenArea = UIScreen.mainScreen.bounds.size.width
+                       * UIScreen.mainScreen.bounds.size.height;
+    if (screenArea <= 0) return;
+
+    // 锁定: 第一次找到就认下来, 之后只在它离树时才重选(键盘重建会换一批视图)。
+    if (!self.cachedGestureOverlay || !self.cachedGestureOverlay.superview) {
+        self.cachedGestureOverlay = nil;
+        for (UIView *v in container.subviews) {
+            NSString *n = NSStringFromClass(v.class);
+            if (![n hasPrefix:@"UIEditingOverlayGestureView"]) continue;
+            if (!v.userInteractionEnabled) continue;
+            CGRect f = v.frame;
+            CGFloat area = f.size.width * f.size.height;
+            if (area < screenArea * 0.85) continue;
+            self.cachedGestureOverlay = v;
+            break;
+        }
+        if (self.cachedGestureOverlay) {
+            KGLog(@"锁定全屏手势覆盖层 %@ frame=%@ uie=%d",
+                  NSStringFromClass(self.cachedGestureOverlay.class),
+                  NSStringFromCGRect(self.cachedGestureOverlay.frame),
+                  self.cachedGestureOverlay.userInteractionEnabled);
+        }
+    }
+
+    UIView *overlay = self.cachedGestureOverlay;
+    if (!overlay || !overlay.superview) return;
+
+    // 键盘此刻不在屏幕上 -> 这个 932pt 的手势层必须关掉。
+    BOOL keyboardOnScreen = KGIsKeyboardSized(host) && KGIsOnScreen(host);
+    BOOL shouldHide = !keyboardOnScreen;
+
+    if (overlay.hidden != shouldHide) {
+        overlay.hidden = shouldHide;
+        self.lastOverlayWasSuppressed = shouldHide;
+        self.overlaySuppressedCount++;
+        KGLog(@"全屏手势覆盖层 hidden=%d (键盘在屏=%d, 第 %ld 次)",
+              shouldHide ? 1 : 0, keyboardOnScreen ? 1 : 0,
+              (long)self.overlaySuppressedCount);
     }
 }
 
@@ -1287,22 +1493,33 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 
     // 0 = 完全不动 (保持系统原样), 1 = 只留底色保证触摸与字都正常
     //
-    // ============================ v0.7.3 关键修正 ============================
-    // 2026-10-03 用户实测: 「只要唤出键盘, 就点不了键盘以外的东西了」。
-    // 原代码是 `origin * (1.0 - MIN(0.85, strength))`, 滑块拉满时只留 15%。
-    //
-    // 【为什么 15% 会让整个键盘窗口点不动】—— 这三张 UIKBSplitImageView
-    // 不是装饰, 它们是**按键区整块区域的实体底板**, iOS 键盘的触摸派发
-    // 落在底板上。底板 alpha 压到 15% 之后, 命中测试判定整块区域「不算实体」,
-    // 于是从按键区一直往上, **整个键盘窗口都失去响应** —— 表现就是
-    // 「键盘能显示、能打字(按键自己走另一条路由), 但键盘以外的任何东西都点不到」。
-    //
-    // 注意这里的误判代价: 我第一反应是「玻璃挡了触摸」(玻璃一直好好的,
-    // userInteractionEnabled=NO), 探针里 veilDesc=none 61 次全中直接推翻了它。
-    // **别把触摸问题默认归给「那个新加的视图」, 先确认它到底有没有被改过。**
-    //
-    // 下限取 0.55: 观感上仍然明显透出玻璃(45% 透明), 但实体层足够撑住
-    // 命中判定。这是从 v0.7.0 的 0.15 一步提到 0.55 的原因。
+// ============================ v0.7.4 已证伪,勿再采信 ============================
+// 下面这段v0.7.3 的推理**已经被实测推翻**, 保留原文是为了警示后来人:
+// 「底板调到 15% 会让整个键盘窗口点不动」这个结论是**错的**。
+// 证伪方式很干净: v0.7.3 把下限提到 0.55(几乎等于不调淡), 如果这个结论
+// 成立, 用户的症状就该消失 —— **结果一点没变**。
+// 被我改过的那个变量与症状无关, 就说明它不是原因。
+// 真正的元凶是宿主**上一层**那个 932pt 全屏手势覆盖层, 见 enforceFullscreenGestureOverlay:。
+//
+// ---------- 以下为 v0.7.3 的原始(错误)推理, 仅存档 ----------
+// 2026-10-03 用户实测: 「只要唤出键盘, 就点不了键盘以外的东西了」。
+// 原代码是 `origin * (1.0 - MIN(0.85, strength))`, 滑块拉满时只留 15%。
+//
+// 【错误归因】我判断这三张 UIKBSplitImageView 是「接收点击的实体层」,压到
+// 15% 会让命中测试失效, 于是整个键盘窗口失去响应。
+// ——这个判断没有任何探针证据支撑, 纯粹是又一次「看着像就归给它」。
+//
+// 【教训 —— 第 11 版了, 这条最贵】
+//   改一个参数之后症状没变化, 就等于**证明了那个参数不是原因**。
+//   我当时没做这个推论, 反而把下限从 0.15 提到 0.55 交付给用户, 让用户
+//   白白重装一次去验证一个我已经能预判为「无效」的猜测。
+//   **「改了没变」是最强的排除证据, 必须先吃下这条结论再动手。**
+//
+// ---------- 存档结束 ----------
+//
+// 【本方法的现状】v0.7.4 起**不再被调用**(调用点在 kg_refreshWithHost: 里
+// 已注释)。系统底板一律保持原值, 观感改由玻璃自身的底色浓度控制。
+// 代码整段保留, 供将来需要时复查 iOS 版本变化。
     CGFloat strength = [KGPrefs keyplaneDim];
     for (UIView *kb in self.cachedKeyplaneBackdrops) {
         if (!kb.superview) continue;
@@ -1471,6 +1688,19 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     }
     if (barDesc.length == 0) [barDesc appendString:@"none"];
 
+    // ==================================================================
+    // 【v0.7.4】全屏手势覆盖层 —— 本版的病根, 单独一行盯死它。
+    // 期望看到 overlayHidden=1(已关掉)。如果一直是 0 而用户仍报
+    // 「键盘外点不动」, 那说明还有第二条路径, 按新探针的「键盘外命中」查。
+    // ==================================================================
+    UIView *ov = self.cachedGestureOverlay;
+    NSString *ovDesc = ov
+        ? [NSString stringWithFormat:@"%@(%@,a=%.2f,h=%d,uie=%d,压=%ld)",
+           NSStringFromClass(ov.class), NSStringFromCGRect(ov.frame),
+           ov.alpha, ov.hidden ? 1 : 0, ov.userInteractionEnabled,
+           (long)self.overlaySuppressedCount]
+        : @"none";
+
     // 玻璃正下方那三层是谁 —— 玻璃是 backdrop, 采样源就在它下面。
     // 如果这几层里有东西仍然不透明, 玻璃就采不到键盘外面的画面。
     //
@@ -1495,13 +1725,13 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 
     // signature 要把底板层数和真实 alpha 都算进去: v0.6.0 之前只记了类名,
     // 结果「3 张图里只调淡了 1 张」这种状态探针完全看不出来(签名没变就不重写)。
-    NSString *signature = [NSString stringWithFormat:@"%@|%@|%@|%ld|%ld|%ld|%ld|%@|%.3f|%lu|%.3f|%@|%@|%@",
+    NSString *signature = [NSString stringWithFormat:@"%@|%@|%@|%ld|%ld|%ld|%ld|%@|%.3f|%lu|%.3f|%@|%@|%@|%@",
         NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
         bg ? NSStringFromClass(bg.class) : @"none",
         (long)vi, (long)li, (long)fi, (long)mode,
         kbDesc, bg.alpha,
         (unsigned long)self.cachedKeyplaneBackdrops.count, [KGPrefs keyplaneDim],
-        veilDesc, glassPos, barDesc];
+        veilDesc, glassPos, barDesc, ovDesc];
     if ([signature isEqualToString:self.lastProbeSignature]) return;
     self.lastProbeSignature = signature;
     // 【v0.7.2】总条数硬闸 400 条。签名去重挡不住「状态一直在变」的情况 ——
@@ -1517,6 +1747,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         @"         keyBg=%@\n"
         @"         veilDesc=%@\n"
         @"         topBar=%@\n"
+        @"         gestureOverlay=%@\n"
         @"         underGlass=%@\n",
         [NSDate date], (long)mode,
         NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
@@ -1530,7 +1761,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         self.appliedStyle.highlight, self.appliedStyle.veil,
         self.appliedStyle.cornerRadius, [KGPrefs showLayerOutline],
         (long)material, self.appliedStyle.dark, [KGPrefs keyplaneDim],
-        bgDesc, kbDesc, veilDesc, barDesc, underDesc]);
+        bgDesc, kbDesc, veilDesc, barDesc, ovDesc, underDesc]);
 }
 
 - (void)restoreNativeBackdrops {
@@ -1551,6 +1782,12 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     self.cachedBlurVeils = nil;
     // v0.7.3: 同理, 顶部助手条。
     self.cachedAssistantBars = nil;
+    // 【v0.7.4】全屏手势覆盖层**故意不复位**。
+    //
+    // 它在宿主**外面**(UIInputSetContainerView 下), 不随键盘重建而换实例,
+    // 复位反而会导致每 0.4s 重新扫一遍容器子树。而且它是 weak 引用 ——
+    // 系统真把它回收了, 下次 enforce 会自动重新锁定。
+    self.overlaySuppressedCount = 0;
 }
 
 - (void)teardown {

@@ -272,7 +272,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>调淡按键区脚下的底图，让玻璃从键缝透上来。拖到 0 = 保持系统原样；往右拖越透明，玻璃感越强。0.6~0.7 是观感和可读性的折中，不要拖到最右——底板同时是键盘接收点击的实体层，调得太淡会导致键盘以外的界面点不动。</string>
+			<string>本版起该滑块已停用：调淡系统底板不是「键盘以外点不动」的病根（真正的病根是键盘窗口上方那层全屏手势覆盖层，本版已单独处理）。系统底板一律保持原值，玻璃感改由上面的「底色浓度」控制。留在这里只是兼容旧配置，不需要再动它。</string>
 			<key>label</key>
 			<string>按键区底色</string>
 		</dict>
@@ -366,7 +366,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>板栗仁 · KeyboardGlass 0.7.3</string>
+			<string>板栗仁 · KeyboardGlass 0.7.4</string>
 		</dict>
 	</array>
 	<key>title</key>
