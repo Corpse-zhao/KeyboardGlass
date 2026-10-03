@@ -41,12 +41,16 @@ static const CGFloat kKGDefaultCornerRadius = 10.0;
 //        真正的元凶。旧存档里没有它, 不迁移就永远是 registerDefaults 的 0.65,
 //        而用户之前十一个版本攒下的「底色浓度」是按另一套语义调出来的, 得重置。
 // 9 = v1.1.0 新增五个动作的独立开关 + 安全档。
-// 10 = v2.0.0 架构转向微信输入法: 六个二分开关整体废弃, 换成
-//     「扩展进程探针(默认开) + 宿主旧逻辑(默认关)」。
-//     **必须升**: 否则用户存档里还留着 v1.1.0 的 SafeMode=YES, 而代码已经
-//     不读它了 —— 设置面板会一直显示一个「安全档」开关, 拨它没有任何反应。
-//     升版时 writeRecommendedParams 会把这六个键从存档里删干净。
-static const NSInteger kKGParamsVersion = 10;
+// 11 = v3.0.0 推翻重做: 删掉 v2.0.0 的 ExtProbe/HostKeyboardActions,
+//新增「底板白度」(BackdropWhiteness)。
+//     **必须升**, 三个原因:
+//     a) 不升的话用户存档里留着 ExtProbe=YES, 而探针代码已删 —— 面板会
+//        显示一个不存在的开关, 拨它毫无反应。
+//     b) 旧存档里没有 BackdropWhiteness, 不迁移就用 registerDefaults 的
+//        默认值。默认值本身设成「肉眼可辨」, 所以不迁移也能出效果。
+//     c) 十三版攒下的 GlassTransparency/KeyplaneDim 是按「调效果图层」
+//        的语义拖出来的, 那个方向已被数据证伪, 必须重置回推荐值。
+static const NSInteger kKGParamsVersion = 11;
 
 // v1.0.0: 玻璃通透度默认值。系统那层浓白调淡 65% —— 留 35% 压住, 保证
 // 按键上的白字在浅色 App 背景下仍然读得清。拖到 1.0 玻璃感最强。
@@ -55,6 +59,12 @@ static const CGFloat kKGDefaultGlassTransparency = 0.65;
 // v1.0.0: 按键区底色调淡默认值。与通透度分开, 因为这两层压在一起才
 // 决定「按键区透不透」。0.7 调淡 70% 留 30% 底色, 键缝能透出玻璃。
 static const CGFloat kKGDefaultKeyplaneDim = 0.70;
+
+// v3.0.0: 底板白度默认值。系统原本 0.10, 这里给 0.03 ——
+// 「明显比系统通透」但「按键字还读得清」的那一档。
+// 定这个值的依据: 探针实测 bg=1.00/1.00/1.00/0.10, 铺满整个键盘区。
+// 调到 0 会让浅色 App 上的按键白字失去对比度, 用户会以为按键坏了。
+static const CGFloat kKGDefaultBackdropWhiteness = 0.03;
 
 static BOOL kKGDebugEnabled = NO;
 
@@ -100,17 +110,13 @@ void KGLog(NSString *format, ...) {
         @"DebugLog":           @NO,
         @"ShowLayerOutline":   @NO,
 
-        // ---- v2.0.0: 架构收敛为两条路 ----
-        // v1.1.0 那六个开关是在「宿主进程里改宿主层」这个(已被证伪的)前提下
-        // 设计的二分。前提没了, 开关也没意义, 全部弃用并从存档清除。
-        //
-        // 扩展进程探针默认**开**: 它只读视图树 + 写一个文件, 零副作用,
-        // 而收益是「第一次真正看清微信输入法的按键区长什么样」。
-        @"ExtProbe":            @YES,
-        // 宿主旧逻辑默认**关**: v1.1.0 探针证明它改的那几个层在 iOS 16 上
-        // 根本不存在(所谓全屏白底 _UIRemoteView 全树 0 次出现)。
-        // 继续跑它只会让用户分不清是哪个开关在起作用。
-        @"HostKeyboardActions":  @NO,
+        // ---- v3.0.0: 底板白度 ----
+        // 系统在 UIKBBackdropView 上铺的那层白, 探针实测 bg=1.00/1.00/1.00/0.10。
+        // 0.10 已经很淡, 但键盘整体观感仍偏"实心浅灰" —— 因为它铺的是
+        // **整个键盘区**。往上调(更白) = 更实心; 往下调(更透) = 玻璃感。
+        // 默认 0.03: 保留一点点白以维持按键文字对比度, 同时明显比 0.10 通透。
+        // 调0 就是全透, 键缝能看清下层 App 内容, 但浅色App 上按键字会发飘。
+        @"BackdropWhiteness":  @(kKGDefaultBackdropWhiteness),
     }];
     // v1.0.0: WorkMode / GlassOverKeys 已彻底废弃, 这里**不注册**。
     // 注册一个永远没人读的下拉项, 只会让人拖到「纯探针」档以为插件没生效。
@@ -142,18 +148,17 @@ void KGLog(NSString *format, ...) {
     // 留着只会让设置面板冒出没人认得的档位名。
     [d removeObjectForKey:@"WorkMode"];
     [d removeObjectForKey:@"GlassOverKeys"];
-    // v2.0.0: v1.1.0 那六个二分开关彻底清掉。它们的整个设计前提是
-    // 「在宿主进程里改宿主层就能调出玻璃效果」, 而 v1.1.0 的探针已经证明
-    // 前提不成立(宿主树里一个按键视图都没有)。留着它们只会让用户
-    // 面对六个不起作用的开关, 以为是自己操作错了。
+    // v2.0.0~v3.0.0: 探针期与六个二分开关全部清掉。v2.0.0 是纯探针版,
+    // 探针文件已随引擎重写删除, ExtProbe 留着会让人以为还有一个开关在
+    // 控制什么。六个二分开关的整个设计前提也已被全量数据证伪。
     for (NSString *dead in @[@"SafeMode", @"ActionGlass", @"ActionVeil",
                              @"ActionAssistantBar", @"ActionKeyBottom",
-                             @"ActionFullscreenWhite"]) {
+                             @"ActionFullscreenWhite",
+                             @"ExtProbe", @"HostKeyboardActions"]) {
         [d removeObjectForKey:dead];
     }
-    // v2.0.0 的两个新开关: 探针开、旧逻辑关。
-    [d setObject:@YES forKey:@"ExtProbe"];
-    [d setObject:@NO  forKey:@"HostKeyboardActions"];
+    // v3.0.0: 唯一的新参数 —— 底板白度。
+    [d setObject:@(kKGDefaultBackdropWhiteness) forKey:@"BackdropWhiteness"];
     [d synchronize];
 }
 
@@ -279,18 +284,20 @@ void KGLog(NSString *format, ...) {
     return v;
 }
 
-// ---- v2.0.0: 两条路的开关 ----
-// 读法统一: 存档里没有这个键时才用默认值。
-+ (BOOL)kg_action:(NSString *)key def:(BOOL)def {
+// ---- v3.0.0: 底板白度 ----
+// 语义: 直接就是 UIKBBackdropView 那层白的 alpha。0 = 全透, 1 = 全白。
+// 不用再像 GlassTransparency 那样绕一层「调淡比例」—— 那个间接映射
+// 是十三版「调了半天看不出变化」的帮凶之一。这里给什么值就是什么值。
++ (CGFloat)backdropWhiteness {
     NSUserDefaults *d = [self defaults];
-    if ([d objectForKey:key] == nil) return def;
-    return [d boolForKey:key];
+    if ([d objectForKey:@"BackdropWhiteness"] == nil) {
+        return kKGDefaultBackdropWhiteness;
+    }
+    CGFloat v = [d doubleForKey:@"BackdropWhiteness"];
+    if (v < 0) v = 0;
+    if (v > 1) v = 1;
+    return v;
 }
-
-// 扩展进程探针, 默认开(只读视图树, 零副作用)
-+ (BOOL)extProbe { return [self kg_action:@"ExtProbe" def:YES]; }
-// 宿主进程旧逻辑, 默认关(它改的层已被证明在 iOS 16 上不存在)
-+ (BOOL)hostKeyboardActions { return [self kg_action:@"HostKeyboardActions" def:NO]; }
 
 + (BOOL)debugLog {
     kKGDebugEnabled = [[self defaults] boolForKey:@"DebugLog"];

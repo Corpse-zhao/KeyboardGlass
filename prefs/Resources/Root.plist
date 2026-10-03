@@ -8,9 +8,9 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>给键盘换上 iOS 26 风格的玻璃材质。2.0.0 起目标改为**微信输入法**（系统键盘的按键画在 App 进程里，微信输入法的画在它自己的扩展进程里，之前十三版一直在错误的进程里找按键，所以怎么改都没反应）。
+			<string>给键盘换上 iOS 26 风格的玻璃材质。3.0.0 是推翻重做版：之前十三版一直找不到该改的层，这一版靠 253MB 探针数据定位到了真正的目标，重新写了一遍。
 
-**这一版只探测、不改动界面**，先把按键层次看清楚再动手。请保持默认设置，唤出微信输入法用十几秒，然后回传探针文件。</string>
+**装上就有效果，不用改任何设置。** 如果键盘看起来和原来没区别，先把「底板白度」往左拖 —— 那是这一版真正起作用的那一处。</string>
 			<key>label</key>
 			<string>键盘液态玻璃</string>
 		</dict>
@@ -27,60 +27,6 @@
 			<string>Enabled</string>
 			<key>label</key>
 			<string>启用</string>
-			<key>set</key>
-			<string>setPreferenceValue:specifier:</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>footerText</key>
-			<string>2.0.0 是重大改版：目标从「系统键盘」换成「微信输入法」。
-
-探针实锤的原因：系统键盘的按键画在 App 进程里，而微信输入法的按键是**在它自己的输入法扩展进程里画好后嵌进来的**。之前十三版一直在 App 进程里找按键、找都找不到，所以改什么都没反应。
-
-这一版**只探测、不改动任何界面**，目的是先把微信输入法的按键层次看清楚了，再决定怎么改。请保持默认开启，唤出微信输入法用一会儿，然后回传探针文件。</string>
-			<key>label</key>
-			<string>2.0.0 微信输入法（先探不改）</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>default</key>
-			<true/>
-			<key>defaults</key>
-			<string>com.banli.keyboardglass.preferences</string>
-			<key>get</key>
-			<string>readPreferenceValue:</string>
-			<key>key</key>
-			<string>ExtProbe</string>
-			<key>label</key>
-			<string>扩展进程探针（推荐保持开启）</string>
-			<key>set</key>
-			<string>setPreferenceValue:specifier:</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>footerText</key>
-			<string>保留上一版的做法（只对系统键盘生效）。**默认关闭**，因为探针已经确认它要找的那一层在 iOS 16 上根本不存在。
-
-除非你想回头验证「系统键盘到底能不能改」，否则不用打开它。打开它会重新开始改动系统键盘的视图，之前十三个版本的问题会原样回来。</string>
-			<key>label</key>
-			<string>旧版逻辑（不建议开）</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>default</key>
-			<false/>
-			<key>defaults</key>
-			<string>com.banli.keyboardglass.preferences</string>
-			<key>get</key>
-			<string>readPreferenceValue:</string>
-			<key>key</key>
-			<string>HostKeyboardActions</string>
-			<key>label</key>
-			<string>启用 1.1.0 及更早的宿主逻辑</string>
 			<key>set</key>
 			<string>setPreferenceValue:specifier:</string>
 		</dict>
@@ -122,13 +68,39 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>2.0.0：目标改为微信输入法，改为在输入法扩展进程里探测。
-1.1.0：把五处改动拆成五个开关做二分排查。
-1.0.0：架构重写，确立「只改 uie=0 的层」这条铁律。
+			<string>**这一版最重要的一处。**
 
-这一版没有新增视觉效果，只有探针。收到你的回传之后，我才会做第一版真正能看出玻璃效果的版本。</string>
+系统键盘自己在整个键盘区铺了一层白（探针实测：颜色是白，透明度 0.10），这就是键盘看起来「实心浅灰」的真正原因。之前的版本一直在调旁边那个模糊层（效果图层），调错了对象，所以怎么拖都没变化。
+
+这个滑块直接就是那层白的浓度：**0 = 完全透明，键缝里能看清下面 App 的内容；0.10 = 系统原样。** 默认 0.03，保留一点点白以保证按键上的字还读得清。
+
+往左拖会明显更通透。</string>
 			<key>label</key>
-			<string>版本说明</string>
+			<string>底板白度</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSStaticTextCell</string>
+			<key>cellClass</key>
+			<string>KGSliderCell</string>
+			<key>default</key>
+			<real>0.03</real>
+			<key>defaults</key>
+			<string>com.banli.keyboardglass.preferences</string>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>key</key>
+			<string>BackdropWhiteness</string>
+			<key>label</key>
+			<string>底板白度（最有效）</string>
+			<key>max</key>
+			<real>0.3</real>
+			<key>min</key>
+			<real>0.0</real>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+			<key>showValue</key>
+			<true/>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -248,38 +220,6 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>通透度是 1.0.0 新增的主控滑块。系统键盘自己带一层很浓的浅灰底色，之前十一个版本一直没找到正确的层去调它，所以怎么调都不透 —— 这一版才真正把它调淡。拖到最右玻璃感最强；拖到最左就是系统原样。</string>
-			<key>label</key>
-			<string>通透度</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSStaticTextCell</string>
-			<key>cellClass</key>
-			<string>KGSliderCell</string>
-			<key>default</key>
-			<real>0.65</real>
-			<key>defaults</key>
-			<string>com.banli.keyboardglass.preferences</string>
-			<key>get</key>
-			<string>readPreferenceValue:</string>
-			<key>key</key>
-			<string>GlassTransparency</string>
-			<key>label</key>
-			<string>玻璃通透度</string>
-			<key>max</key>
-			<real>1.0</real>
-			<key>min</key>
-			<real>0.0</real>
-			<key>set</key>
-			<string>setPreferenceValue:specifier:</string>
-			<key>showValue</key>
-			<true/>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>footerText</key>
 			<string>顶部圆角让键盘像 iOS 26 那样从屏幕底部浮起来。设为 0 则保持原来的直角。</string>
 			<key>label</key>
 			<string>键盘外观</string>
@@ -312,83 +252,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
-			<string>兼容与调试</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>default</key>
-			<true/>
-			<key>defaults</key>
-			<string>com.banli.keyboardglass.preferences</string>
-			<key>get</key>
-			<string>readPreferenceValue:</string>
-			<key>key</key>
-			<string>HideNativeBackdrop</string>
-			<key>label</key>
-			<string>隐藏原生背板</string>
-			<key>set</key>
-			<string>setPreferenceValue:specifier:</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>footerText</key>
-			<string>这一版重新启用了该滑块。老版本给它设过一个 0.55 的下限，理由是「怕拖太淡导致键盘点不动」——1.0.0 已查明这是误判：按键区那层图不参与点击判断，拖到多少都不影响打字。所以现在它只管观感，想多透就多透。</string>
-			<key>label</key>
-			<string>按键区底色</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSStaticTextCell</string>
-			<key>cellClass</key>
-			<string>KGSliderCell</string>
-			<key>default</key>
-			<real>0.7</real>
-			<key>defaults</key>
-			<string>com.banli.keyboardglass.preferences</string>
-			<key>get</key>
-			<string>readPreferenceValue:</string>
-			<key>key</key>
-			<string>KeyplaneDim</string>
-			<key>label</key>
-			<string>底色调淡强度</string>
-			<key>max</key>
-			<real>0.9</real>
-			<key>min</key>
-			<real>0.0</real>
-			<key>set</key>
-			<string>setPreferenceValue:specifier:</string>
-			<key>showValue</key>
-			<true/>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>footerText</key>
-			<string>隐藏系统原有的键盘背景，玻璃层才能采到键盘下方的画面、模糊才有意义。键盘看起来缺色或者太透就把它关掉——关掉后玻璃层依然可见，只是模糊会失去参照。</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>default</key>
-			<false/>
-			<key>defaults</key>
-			<string>com.banli.keyboardglass.preferences</string>
-			<key>get</key>
-			<string>readPreferenceValue:</string>
-			<key>key</key>
-			<string>DebugLog</string>
-			<key>label</key>
-			<string>调试日志</string>
-			<key>set</key>
-			<string>setPreferenceValue:specifier:</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSGroupCell</string>
-			<key>footerText</key>
-			<string>打开后会向系统日志输出 [KeyboardGlass] 前缀的调试信息，排查问题后再关掉。</string>
+			<string>调试</string>
 		</dict>
 		<dict>
 			<key>cell</key>
@@ -414,6 +278,28 @@
 		</dict>
 		<dict>
 			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<false/>
+			<key>defaults</key>
+			<string>com.banli.keyboardglass.preferences</string>
+			<key>get</key>
+			<string>readPreferenceValue:</string>
+			<key>key</key>
+			<string>DebugLog</string>
+			<key>label</key>
+			<string>调试日志</string>
+			<key>set</key>
+			<string>setPreferenceValue:specifier:</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>footerText</key>
+			<string>打开后会向系统日志输出 [KeyboardGlass] 前缀的调试信息，排查问题后再关掉。</string>
+		</dict>
+		<dict>
+			<key>cell</key>
 			<string>PSGroupCell</string>
 		</dict>
 		<dict>
@@ -428,7 +314,12 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>板栗仁 · KeyboardGlass 2.0.0</string>
+			<string>板栗仁 · KeyboardGlass 3.0.0
+
+3.0.0：推翻重做。靠探针数据定位到真正的目标层（系统铺在键盘区的那层白），引擎整个重写。
+2.0.0：纯探针版，只看不改。
+1.1.0：把五处改动拆成五个开关做二分排查。
+1.0.0：确立「只改纯视觉层」这条铁律。</string>
 		</dict>
 	</array>
 	<key>title</key>

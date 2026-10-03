@@ -60,32 +60,43 @@ extern NSString * const KGPrefsSuiteName;
 + (CGFloat)keyplaneDim;
 
 // ======================================================================
-// 【v2.0.0】架构已改: 微信输入法 vs 系统键盘, 两条完全不同的路
+// 【v3.0.0】推翻重做 —— 架构从「多动作二分」改成「两处定点」
 // ======================================================================
 //
-// 【v1.1.0 探针实锤, 这一版是它推出来的】
-// 宿主进程(UITextEffectsWindow)里只有 `_UIRemoteKeyboardPlaceholderView`
-// (430x288) 这个远程占位视图, **一个按键视图都没有**。所以:
+// 【v1.1.0 探针 253MB 全量数据(157 棵全树)定案】
+// 微信输入法态(顶层窗口 UIRemoteKeyboardWindow, 含 SquidExtender.* / TUI*)下实测:
 //
-//   - 系统键盘路径(本插件一直在做的): 按键在宿主进程里, 是 UIKBKeyplaneView
-//     等 UIKB* 类。改它们的 alpha 理论上有效 —— 但 v1.1.0 探针也证明,
-//     十三版调的那几个层(含所谓的「全屏白底 _UIRemoteView」)在 iOS 16 上
-//     **根本不存在**, 所以既没效果也可能留了残改。
-//   - 微信输入法路径: 按键在**输入法扩展进程**里自绘, 通过远程视图嵌进宿主。
-//     宿主进程里改什么都碰不到它。必须在扩展进程里动手。
+//   0UIRemoteKeyboardWindow        430x932 uie=1
+//    1 UIInputSetContainerView     430x932 uie=1
+//     2 UIInputSetHostView         {0,576},{430,356} uie=1   ← 宿主, 键盘区
+//      3 UIKBInputBackdropView     430x311 uie=0
+//       4 UIKBBackdropView         430x311 uie=1 bg=白/0.10  ← 键盘底板
+//        5 _UIVisualEffectBackdropView 430x311 uie=0
+//      3 UIKBInputBackdropView     430x45  uie=0
+//       4 UIKBBackdropView         430x45  uie=1 bg=白/0.10   ← 工具条底板
+//        5 _UIVisualEffectBackdropView 430x45  uie=0
+//      3 UIKeyboardAutomatic → UIKeyboardLayoutStar → UIKBKeyplaneView
+//          UIKBSplitImageView x3 (uie=0) / UIKBKeyView x5 (uie=0)
 //
-// 【所以现在只有两个开关, 而不是 v1.1.0 的六个】
-// 六个开关是在「宿主进程里改宿主层」这个错误前提下设计的二分,
-// 前提没了, 开关也就没意义了。留两个:
-//   - extProbe          扩展进程探针(默认开): dump 微信输入法按键层级, 只读
-//   - hostKeyboardActions 宿主旧逻辑(默认关): 保留十三版代码, 留作对照
+// 【三个被数据推翻的旧结论】
+// 1. v2.0.0「按键在输入法扩展进程」**错**。按键层在宿主进程里, 层级完整。
+//    (我上一轮只看 tail 截断片段就下的跨进程结论, 全量统计已纠正)
+// 2. 十三版「玻璃层插在宿主里」导致看不见**有确切物证**: 探针里那行
+//    `2 KGGlassView {0,0},{430,932}` —— 全屏大小, 而键盘只有 356pt 高。
+//    玻璃比键盘大 5 倍且z序在按键之上, 观感是「更浑浊」不是「更透」。
+// 3.键盘「实心浅灰」的元凶是 **UIKBBackdropView 上那层 bg=白/0.10**,
+//    不是 _UIVisualEffectBackdropView。十三版一直在调后者, 所以永远差一口。
 //
-// 【为什么不是直接上效果】
-// 十三版每版同时改好几个变量, 反馈全是「还是啥都没解决」。
-// 根因是我从来没先看清过微信输入法的按键区长什么样。
-// 这一版**只探不改**, 先把目标看清楚 —— 十五版以来第一次这么做。
-+ (BOOL)extProbe;
-+ (BOOL)hostKeyboardActions;
+// 【v3.0.0 只做两件事, 都作用在纯视觉层】
+//   - 底板白度backdropWhiteness: 调低 UIKBBackdropView 的白底 alpha。
+//     **只写 backgroundColor 这一个属性** —— 改颜色不改变 hitTest 参与性
+//     (UIKit 契约), 所以即便它是 uie=1 也不影响触摸。加/删 subview、改
+//     frame、改 alpha 才会改变命中区域, v3.0.0 一律不做。
+//   - 玻璃层: 插到 UIKBInputBackdropView 里、与底板平级, 尺寸严格等于底板。
++ (CGFloat)backdropWhiteness;
+
+// v2.0.0 的 ExtProbe / HostKeyboardActions 已随探针文件一起删除。
+// 纯探针期结束, 回到「装了就有效果」。
 
 // 一次性参数迁移: 早期版本的默认值 (blur 5 / veil 0) 几乎完全不可见,
 // 用户点不出效果就会以为插件没生效。这里只迁移一次, 迁移后用户自己的

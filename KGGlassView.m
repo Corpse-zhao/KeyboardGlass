@@ -81,41 +81,47 @@ static UIBlurEffectStyle KGEffectStyleForBlur(CGFloat blur, BOOL dark) {
 
     _darkMode = NO;
 
-    @try {
-        // ---- 1. 模糊本体（玻璃的来源）----
-        _blurView = [[UIVisualEffectView alloc] initWithEffect:
-            [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterialLight]];
-        _blurView.userInteractionEnabled = NO;
-        _blurView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-        [self addSubview:_blurView];
+    // 【v3.0.0 不再包 @try】
+    // 原先这里有两处 @try/@catch, 理由是「UIKit 布局回调抛异常直接 abort」。
+    // 但 v2.0.0 踩过坑: Logos 的预处理器可能把 @catch 当成自己的 @c 指令吃掉,
+    // 吐出裸的 `catch (...) {` —— 那是 C++ 语法, .m 里编译不过, CI 报
+    //     error: call to undeclared function 'catch'
+    // 权衡下来: 这个初始化里的四步(建blurView / 建三个 CALayer)全是
+    // **纯内存分配**, 失败的话 alloc 本身返回 nil, 后续addSubview:nil
+    // 在 ObjC 里是合法的 no-op, **不会抛异常**。所以 @try 从来没有必要,
+    // 去掉它换来的是「不会被 Logos 预处理器的怪癖绊倒」。
+    //
+    // ---- 1. 模糊本体(玻璃的来源)----
+    _blurView = [[UIVisualEffectView alloc] initWithEffect:
+        [UIBlurEffect effectWithStyle:UIBlurEffectStyleSystemMaterialLight]];
+    _blurView.userInteractionEnabled = NO;
+    _blurView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [self addSubview:_blurView];
 
-        // ---- 2. 底色 veil ----
-        _veilLayer = [CALayer layer];
-        _veilLayer.masksToBounds = YES;
-        [self.layer addSublayer:_veilLayer];
+    // ---- 2. 底色 veil ----
+    _veilLayer = [CALayer layer];
+    _veilLayer.masksToBounds = YES;
+    [self.layer addSublayer:_veilLayer];
 
-        // ---- 3. 顶部高光带 ----
-        // 高度随高光强度走, 固定在顶部, 往下淡出。用 axial(纵向)渐变。
-        _topGlowLayer = [CAGradientLayer layer];
-        _topGlowLayer.type = kCAGradientLayerAxial;
-        _topGlowLayer.startPoint = CGPointMake(0.5, 0.0);
-        _topGlowLayer.endPoint   = CGPointMake(0.5, 1.0);
-        [self.layer addSublayer:_topGlowLayer];
+    // ---- 3. 顶部高光带 ----
+    // 高度随高光强度走, 固定在顶部, 往下淡出。用 axial(纵向)渐变。
+    _topGlowLayer = [CAGradientLayer layer];
+    _topGlowLayer.type = kCAGradientLayerAxial;
+    _topGlowLayer.startPoint = CGPointMake(0.5, 0.0);
+    _topGlowLayer.endPoint   = CGPointMake(0.5, 1.0);
+    [self.layer addSublayer:_topGlowLayer];
 
-        // ---- 4. 边缘高光环 ----
-        _rimLayer = [CAGradientLayer layer];
-        _rimLayer.type = kCAGradientLayerAxial;
-        _rimLayer.startPoint = CGPointMake(0.5, 0.0);
-        _rimLayer.endPoint   = CGPointMake(0.5, 1.0);
-        [self.layer addSublayer:_rimLayer];
+    // ---- 4. 边缘高光环 ----
+    _rimLayer = [CAGradientLayer layer];
+    _rimLayer.type = kCAGradientLayerAxial;
+    _rimLayer.startPoint = CGPointMake(0.5, 0.0);
+    _rimLayer.endPoint   = CGPointMake(0.5, 1.0);
+    [self.layer addSublayer:_rimLayer];
 
-        _rimMask = [CAShapeLayer layer];
-        _rimMask.fillColor = [UIColor whiteColor].CGColor;
-        _rimMask.fillRule = kCAFillRuleEvenOdd;
-        [self.layer addSublayer:_rimMask];
-    } @catch (NSException *exception) {
-        NSLog(@"[KeyboardGlass] kg_setup 异常, 退化为纯透明: %@", exception);
-    }
+    _rimMask = [CAShapeLayer layer];
+    _rimMask.fillColor = [UIColor whiteColor].CGColor;
+    _rimMask.fillRule = kCAFillRuleEvenOdd;
+    [self.layer addSublayer:_rimMask];
 }
 
 - (void)applyStyle:(KGStyle)style dark:(BOOL)dark {
@@ -135,11 +141,11 @@ static UIBlurEffectStyle KGEffectStyleForBlur(CGFloat blur, BOOL dark) {
 - (void)layoutSubviews {
     [super layoutSubviews];
     // v0.4.2 教训: 这里是 UIKit 布局回调, 抛异常直接 abort, 必须兜住。
-    @try {
-        [self kg_layoutSafe];
-    } @catch (NSException *exception) {
-        NSLog(@"[KeyboardGlass] layoutSubviews 异常, 本帧不更新玻璃: %@", exception);
-    }
+    // 【v3.0.0 去掉 @try】kg_layoutSafe 里全是 CALayer 属性赋值与
+    // CGColor 比较, 没有一处会抛异常(@try 的原始理由已不成立),
+    // 而 @catch 有被 Logos 预处理成裸 C++ 语法的实测风险(见 kg_setup 注释)。
+    // 为了一个不存在的风险去留一个真风险, 不值当。
+    [self kg_layoutSafe];
 }
 
 - (void)kg_layoutSafe {
