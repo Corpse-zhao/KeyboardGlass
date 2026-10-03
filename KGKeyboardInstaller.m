@@ -362,6 +362,12 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 @interface KGKeyboardInstaller ()
 // 真正的主流程。由 refreshWithHost: 包着 @try 调用。
 - (void)kg_refreshWithHost:(UIView *)host;
+// 【v0.7.2】下面这两个在 kg_workerTick 里就被调用, 但定义都在文件更靠后的
+// 位置 —— 私有方法不写前置声明会报 "no visible @interface declares the
+// selector"。跟静态 C 函数不同, 这条编译器不认, 必须自己声明。
+- (void)refreshWithHost:(UIView *)host;
+- (UIView *)findInputSetHostIn:(UIView *)root;
+- (void)restoreNativeBackdrops;
 // v0.5.0: 从 KGGlassLayer (纯 CALayer) 换成 KGGlassView (UIView + UIVisualEffectView)。
 // 换的原因见 KGGlassView.h —— CABackdropLayer 采不到别的窗口的内容, 玻璃等于全透明。
 @property (nonatomic, strong) KGGlassView *glassView;
@@ -399,6 +405,20 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 @property (nonatomic, assign) BOOL didRunTouchDiag;
 @property (nonatomic, copy)   NSString *lastProbeSignature;
 @property (nonatomic, assign) NSUInteger probeCount;
+
+// ---- v0.7.2: 「只观测」与「定时器干活」之间传递状态用的 ivar ----
+// 布局回调只写 seenHostView / seenContainerView / dirty 三个, 别的都不碰。
+@property (nonatomic, weak)   UIView *seenHostView;
+@property (nonatomic, weak)   UIView *seenContainerView;
+@property (nonatomic, assign) BOOL dirty;
+// 唯一那个定时器。repeats, 永不销毁 —— 2.5Hz 的空转开销可以忽略,
+// 而「键盘什么时候弹出」我们无从预知, 装个常驻轮询最省事也最不容易漏。
+@property (nonatomic, strong) NSTimer *workerTimer;
+// 稳定性闸用: 上一次采样到的宿主 frame, 以及它连续相同的次数。
+@property (nonatomic, assign) CGRect lastSampledFrame;
+@property (nonatomic, assign) NSInteger stableCount;
+// 熔断后彻底闭嘴用的静默计数。
+@property (nonatomic, assign) NSInteger silentTicks;
 @end
 
 @implementation KGKeyboardInstaller
@@ -432,36 +452,130 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 
 #pragma mark - 对外入口
 
-- (void)handleHostView:(UIView *)host {
-    // 熔断检查放最前面。已熔断时**一个节点都不碰**, 连探针都不写 ——
-    // 既然判定这代码路径会崩, 就不该再让它有机会碰键盘的视图树。
-    if ([KGKeyboardInstaller isCircuitOpen]) return;
-    if (!KGClassIsInputSetHost(host)) return;
-    // 锁定宿主: 其它宿主一律不理, 否则玻璃层会被来回搬, 触发布局死循环
-    if (self.hostView && self.hostView != host && KGIsUsableHost(self.hostView)) return;
-    [self refreshWithHost:host];
+// ======================================================================
+// 【v0.7.2】下面这两个方法由 %hook 在**布局回调**里调用。
+//
+// 铁律: 这里只允许做「记一个弱引用 + 置一个 BOOL」。任何 addSubview /
+// removeFromSuperview / 改 frame / 改 alpha / setNeedsLayout 都是错的 ——
+// 见 Tweak.x 文件头那段完整死因分析。
+//
+// 尤其注意: **不要在这里加 @try**。@try 展开本身有开销, 而这个方法每秒可能
+// 被调几万次(实测 v0.7.1 一次键盘弹出就走了 7.5 万次)。异常捕获统一放在
+// 定时器那条路径上, 那儿每 0.4s 才跑一次。
+// ======================================================================
+
+- (void)noteHostLayout:(UIView *)host {
+    if (!host) return;
+    // 记下**最后一个**出现过的宿主。多个宿主并存时以最后出现的为准 ——
+    // 展开态下真正承载按键的那个总是最后被布局的那个。
+    self.seenHostView = host;
+    self.dirty = YES;
 }
 
-// root 传 UIInputWindowController.view (UIInputSetContainerView)
-- (void)handleLayout:(UIView *)root {
+- (void)noteContainerLayout:(UIView *)root {
     if (!root) return;
+    self.seenContainerView = root;
+    self.dirty = YES;
+}
+
+#pragma mark - 定时器 (唯一真正干活的地方)
+
+- (void)startWorker {
+    if (self.workerTimer) return;
+    self.workerTimer = [NSTimer scheduledTimerWithTimeInterval:0.4
+                                                      target:self
+                                                    selector:@selector(workerTick:)
+                                                    userInfo:nil
+                                                     repeats:YES];
+    // NSRunLoopCommonModes: 键盘弹出动画期间 runloop 模式会变, 用默认模式
+    // 的定时器在滚动/追踪期间是不触发的, 那正是最需要它工作的时候。
+    [[NSRunLoop mainRunLoop] addTimer:self.workerTimer forMode:NSRunLoopCommonModes];
+    KGLog(@"工作线程已启动: 间隔 0.4s, 稳定性闸 = 连续 2 次 frame 相同");
+}
+
+- (void)workerTick:(NSTimer *)timer {
     if ([KGKeyboardInstaller isCircuitOpen]) return;
+    @try {
+        [self kg_workerTick];
+    } @catch (NSException *exception) {
+        [KGKeyboardInstaller noteHandledException:exception where:@"workerTick"];
+    }
+}
 
-    [KGPrefs debugLog];
+- (void)kg_workerTick {
+    if (self.silentTicks > 0) { self.silentTicks--; return; }
 
-    if (KGIsUsableHost(self.hostView)) {
-        [self refreshWithHost:self.hostView];
+    // 没有任何布局回调来过 -> 键盘压根没在屏幕上, 什么都不用做。
+    if (!self.seenHostView || !self.seenHostView.superview) {
+        // 【v0.7.2 兜底】UIInputSetHostView 的 hook 万一没触发(某些 iOS 版本
+        // 换了宿主类名、或 %hook 因类不存在被跳过), 就退到容器视图里找。
+        // v0.7.1 及以前这条兜底挂在 viewDidLayoutSubviews 里, 现在统一搬到
+        // 定时器里 —— 定时器是唯一允许做全树查找的地方。
+        if (self.seenContainerView) {
+            UIView *found = [self findInputSetHostIn:self.seenContainerView];
+            if (found && KGIsUsableHost(found)) {
+                self.seenHostView = found;
+                self.dirty = YES;
+                self.lastSampledFrame = CGRectNull;
+                self.stableCount = 0;
+            }
+        }
+    }
+    if (!self.seenHostView || !self.seenHostView.superview) {
+        // 顺带清理: 键盘整个走了就把玻璃撤掉, 别留个孤儿 view 挂在那儿。
+        if (self.glassView.superview) {
+            [self teardown];
+        }
+        self.dirty = NO;
         return;
     }
 
-    UIView *host = [self findInputSetHostIn:root];
-    if (host) {
-        [self refreshWithHost:host];
+    // 【稳定性闸 —— v0.7.2 的核心】
+    // 宿主 frame 必须**连续两次采样完全相同**, 才认为键盘已经彻底稳定。
+    // 动画期间 frame 每时每刻都在变, 这一闸直接把整个动画期挡在外面,
+    // 我们不在动画里改视图树, 也就不会有反馈乒乓。
+    CGRect frame = self.seenHostView.frame;
+    if (!CGRectEqualToRect(frame, self.lastSampledFrame)) {
+        self.lastSampledFrame = frame;
+        self.stableCount = 1;
+        return;                     // 变了 -> 只记录, 本轮不动手
+    }
+    if (self.stableCount < 2) { self.stableCount++; return; }
+
+    // 收起 / 出屏: 玻璃必须**彻底离开视图树**。
+    //
+    // 【v0.7.1 教训】v0.7.1 这里改成「不 return, 让玻璃留在宿主里只是隐藏」,
+    // 理由是怕「动画结束后没人来重装」。那个理由本身没错(确实是死锁的一部分),
+    // 但解法错了 —— 玻璃常驻宿主, 它的 frame 就成了宿主布局的一个自变量:
+    // 我们按宿主尺寸写玻璃 frame -> 宿主重排 -> 尺寸又变 -> 再写 ……
+    // 两个布局解互相拉扯, 键盘卡在动画里出不来。
+    // 正确解法就是这一版: 收起就**真的撤掉**, 靠定时器在展开稳定后重装。
+    // 死锁的另一半(装不回来)由定时器解决, 不该由「常驻玻璃」来解决。
+    if (!KGIsKeyboardSized(self.seenHostView) || !KGIsOnScreen(self.seenHostView)) {
+        if (self.glassView.superview) {
+            KGLog(@"键盘收起, 撤掉玻璃 (hostFrame=%@)",
+                  NSStringFromCGRect(self.seenHostView.frame));
+            [self.glassView removeFromSuperview];
+        }
+        // 收起后缓存的层全属于上一棵子树, 必须丢掉, 否则下次 enforce 会拿
+        // 一批已经不在树上的旧层去写 alpha。
+        [self restoreNativeBackdrops];
+        self.hostView = nil;
+        self.dirty = NO;
+        // 【v0.7.2】稳定性闸必须在这里归零。stableCount 只增不减, 一旦某次
+        // 稳定后放行就永远是 2 —— 下一轮展开动画刚开始的那一帧就会被误判成
+        // 「已稳定」, 于是又在动画期里改视图树, 乒乓死循环就回来了。
+        // 归零后下一次展开必须重新连续两次采样相同才放行。
+        self.stableCount = 0;
+        self.lastSampledFrame = CGRectNull;
         return;
     }
 
-    // 兜底: 宿主类名不认识时, 按背板类名找最大那块
-    [self legacyRefreshWithRoot:root];
+    // 收起 -> 展开的过渡期: 脏标记还在, 但稳定性闸已经放行了, 可以干活。
+    if (!self.dirty && self.glassView.superview) return;
+    self.dirty = NO;
+
+    [self refreshWithHost:self.seenHostView];
 }
 
 #pragma mark - 主流程
@@ -476,8 +590,6 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 }
 
 - (void)kg_refreshWithHost:(UIView *)host {
-    [KGPrefs debugLog];
-
     KGWorkMode mode = [KGPrefs workMode];
     KGMaterial material = [KGPrefs material];
 
@@ -486,22 +598,11 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         return;
     }
 
-    // 键盘收起 / 移出屏幕: 只是藏起来, 千万不能因此换宿主。
-    //
-    // 【v0.7.1 修: 原来这里直接 return, 是「玻璃永远装不回去」的另一半原因】
-    // 收起态下 `KGIsKeyboardSized` 为假(高度塌成 0 或移出屏幕), 于是这个分支
-    // 每帧都命中, 而它只做了 hidden=YES 就返回。
-    // 关键在于: 键盘展开动画**结束时 frame 不再变化 -> layoutSubviews 不再被调**
-    // -> 「按键区已就位」那一刻根本没人来装玻璃。
-    // 于是玻璃停在 hidden=YES, 用户看到的就是「压根没有玻璃」。
-    //
-    // 修法: 收起态不 return, 继续往下走 —— 让玻璃**始终留在宿主里**(只是不显示),
-    // 这样展开动画的下一帧自然会把它移到按键之下。
-    BOOL collapsed = (!KGIsKeyboardSized(host) || !KGIsOnScreen(host));
-    if (collapsed) {
-        if (self.glassView.superview) self.glassView.hidden = YES;
-        // 不 return: 继续装玻璃(隐藏状态), 保证展开后不用重装。
-    }
+    // 【v0.7.2】收起态的判定与处理**全部上移到定时器**里(见 kg_workerTick)。
+    // 这里被调用时, 宿主已经通过「键盘尺寸 + 在屏 + frame 连续两次相同」
+    // 三道闸, 也就是说**键盘已经彻底稳定**, 现在改视图树是安全的。
+    // v0.7.1 那个「收起态不 return、让玻璃常驻」的改法已整个删除 ——
+    // 它就是让宿主 frame 乒乓不收敛的元凶, 详见 Tweak.x 文件头。
 
     if (self.hostView != host) {
         KGLog(@"锁定宿主 %@ frame=%@ mode=%ld", NSStringFromClass(host.class),
@@ -513,6 +614,14 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         // (底板层/背景层) 全部属于上一棵子树, 必须重新选。
         self.lastAppliedMode = (KGWorkMode)-1;
         self.glassView.hidden = YES;
+        // 【v0.7.2 修】这两个「一次性」开关原来置位后永不复位, 于是键盘第二次
+        // 弹出就再也不 dump 了 —— 而用户恰恰经常是「收起 -> 再弹」才看到问题。
+        // 每次换宿主都复位, 保证每轮键盘弹出都有完整快照。
+        self.didDumpStableTree = NO;
+        self.didRunTouchDiag = NO;
+        self.lastProbeSignature = nil;
+        // 探针条数也一起重置, 否则第二次弹出就没日志可看了。
+        self.probeCount = 0;
 
         KGDumpHostChildren(host, mode == KGWorkModeProbe ? @"锁定宿主(纯探针)" : @"锁定宿主");
         [self scheduleStableTreeDump:host];
@@ -545,19 +654,14 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 
     if (KGModeShowsGlass(mode)) {
         [self placeGlassInHost:host];
-        // 收起态保持隐藏, 但**玻璃已经在宿主里** —— 展开时无需重装。
-        // (v0.7.1: 原来是无条件 hidden=NO, 收起态也会强行显示)
-        self.glassView.hidden = collapsed ? YES : NO;
+        self.glassView.hidden = NO;
         [self applyStyleForMaterial:material];
     }
 
     // v0.6.0: 按键区底色调淡是**独立于「藏背景」**的一件事, 所以 Glass 档也做。
     // 「藏背景」是 Hide/Full 档的事 (v0.4.1 起刻意解耦, 用于二分隔离);
     // 「调淡按键区底色」则是让按键区变玻璃的必要步骤, 只要玻璃在就该做。
-    //
-    // v0.7.1: 收起态**不做**调淡。收起时重扫子树是纯浪费, 而且收起态的
-    // 子层结构(占位视图)跟展开态完全不同, 缓存里的层属于上一棵子树。
-    if (!collapsed && (KGModeShowsGlass(mode) || KGModeHidesBackdrop(mode))) {
+    if (KGModeShowsGlass(mode) || KGModeHidesBackdrop(mode)) {
         [self enforceKeyplaneBackdropInHost:host];
         // v0.7.0: 系统毛玻璃那层 85% 浓白才是「实心浅灰」的元凶。
         // 用同一个滑块(keyplaneDim)驱动, 因为两者都是「把系统自带的底色调淡」,
@@ -904,38 +1008,30 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 
     UIView *fg = [self firstKeyLayerInHost:host];
 
-    // 【v0.7.1 修: 「找不到按键就不插」这条铁律在动画场景下是错的】
+    // 【v0.7.2 改: 撤掉 v0.7.1 的 insertSubview:atIndex:0「暂驻底部」】
     //
-    // v0.4.3 立这条铁律时, 前提是「宿主一直是同一个, 按键区一直在」。
-    // 实测(2026-10-03 探针, 358 次宿主采样)发现: UIInputSetHostView 的子层
-    // 会**在两套结构之间反复切换**:
-    //   展开态:  UIView + UIKBInputBackdropView + _UIKBCompatInputView + ...
-    //   收起态:  UIKeyboardDockView + _UIRemoteKeyboardPlaceholderView
-    // 收起态里那个 _UIRemoteKeyboardPlaceholderView {{0,0},{430,288}}
-    // **里面根本没有按键**, 于是 firstKeyLayerInHost: 返回 nil ->
-    // 旧代码把玻璃撤出宿主。
+    // v0.7.1 这么改的动机是: 收起态里 firstKeyLayerInHost: 返回 nil, 旧代码
+    // 会把玻璃撤出宿主, 而展开动画结束时 layoutSubviews 不再被调, 没人来重装
+    // —— 探针里 21 次采样有 12 次 glassViewIdx=NSNotFound, 用户看到的就是
+    // 「压根没有玻璃」。**动机是对的, 解法是错的。**
     //
-    // 致命之处在于: 键盘展开动画**结束时 layoutSubviews 不再被调用**
-    // (frame 没变化), 所以「按键出现」那一刻没人去重装玻璃
-    // -> 21 次采样里 12 次 glassViewIdx=NSNotFound -> 用户看到的就是
-    //    「压根没有玻璃」, 跟白底调淡完全无关。
+    // 错在哪: 玻璃常驻宿主之后, 它的 frame 就成了宿主布局的一个自变量:
+    //   我们按宿主尺寸写玻璃 frame -> 宿主重排 -> 尺寸变了 -> 我们再写 …
+    // 两个布局解互相拉扯, 乒乓不收敛。v0.7.1 探针里同一秒 25 次采样,
+    // 宿主 frame 在 {{0,932},{430,243}} 与 {{0,857},{430,75}} 之间来回跳,
+    // 75513 行 dock 视图 dump —— **键盘被卡死在展开动画里, 所以打不了字。**
     //
-    // 修法: 找不到按键时**不要撤玻璃**, 改成插到宿主**最底下**(index 0)。
-    // 为什么这样安全:
-    //   收起态里本来就没有按键, 插哪都不会挡触摸;
-    //   等按键区出现, 下一轮 layout 会走下面的正常分支把它移到按键之下。
-    // 这与 v0.4.3 铁律并不矛盾 —— 那条铁律针对的是「**按键明明在, 却插错了
-    // 位置**」(target 停在 0 压到按键上面)。这里按键不在, 不存在压住的问题。
+    // 正确解法: 找不到按键就**老实撤掉**。「展开后装不回来」这个死锁由
+    // 定时器解决(见 kg_workerTick)—— 它每 0.4s 主动检查一次, 不依赖
+    // 「有没有人恰好在那一刻调 layoutSubviews」。用一个轮询解决时序问题,
+    // 比在视图树里做时间假设稳得多。
     if (!fg) {
-        NSInteger existing = [host.subviews indexOfObject:self.glassView];
-        if (existing == NSNotFound) {
-            [host insertSubview:self.glassView atIndex:0];
-            KGLog(@"玻璃暂驻宿主底部(按键区未就位): host=%@ subviews=%lu",
+        if (self.glassView.superview) {
+            KGLog(@"按键层未就位, 撤掉玻璃: host=%@ subviews=%lu",
                   NSStringFromClass(host.class), (unsigned long)host.subviews.count);
-        } else if (existing != 0) {
-            [host insertSubview:self.glassView atIndex:0];
+            [self.glassView removeFromSuperview];
         }
-        self.glassView.hidden = NO;
+        self.glassView.hidden = YES;
         return;
     }
     // insertSubview:belowSubview: 要求 sibling 关系。fg 可能是宿主的孙辈,
@@ -1176,7 +1272,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     // 光看这一串数字判断不出「是没装上去」还是「装上了但被撤了」。
     // 这里换成人话:
     //   absent  = 玻璃根本不在宿主里
-    //   bottom  = 暂驻底部(按键区还没就位, 收起态)
+    //   bottom  = 在最底下(按键层这轮没找到, 下轮会重装)
     //   underKeys = 装在按键区之下 ← 正常工作的状态
     //   OVERKEYS = 压在按键区之上 ← 有问题
     NSString *glassPos = @"absent";
@@ -1262,10 +1358,14 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         veilDesc, glassPos];
     if ([signature isEqualToString:self.lastProbeSignature]) return;
     self.lastProbeSignature = signature;
-    if (self.probeCount++ > 60) return;
+    // 【v0.7.2】总条数硬闸 400 条。签名去重挡不住「状态一直在变」的情况 ——
+    // v0.7.1 宿主 frame 乒乓, 签名每次都不同, 结果单次键盘弹出就写了 17MB /
+    // 23.5 万行, 手机发回来时微信都卡。架构修好后签名本该稳定, 但留这道闸
+    // 兜底: 探针是诊断手段, 永远不值得把用户的存储和流量吃光。
+    if (self.probeCount++ > 400) return;
 
     KGWriteProbe([NSString stringWithFormat:
-        @"[install %@] mode=%ld host=%@ hostFrame=%@ onScreen=%d glassPos=%@ glassViewIdx=%ld/%lu glassLayerIdx=%ld/%lu fg=%@ subIdx=%ld fgDepth=%ld\n"
+        @"[install %@] mode=%ld host=%@ hostFrame=%@ onScreen=%d glassPos=%@ glassViewIdx=%ld/%lu glassLayerIdx=%ld/%lu fg=%@ subIdx=%ld fgDepth=%ld stable=%ld dirty=%d timer=%d\n"
         @"         blurStyle=%.1f effect=%ld refraction=%.1f highlight=%.2f veil=%.2f radius=%.1f outline=%d material=%ld dark=%d keyDim=%.2f\n"
         @"         hiddenBg=%@\n"
         @"         keyBg=%@\n"
@@ -1277,6 +1377,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         (long)vi, (unsigned long)host.subviews.count,
         (long)li, (unsigned long)host.layer.sublayers.count,
         fg ? NSStringFromClass(fg.class) : @"none", (long)fi, (long)KGDepthOfView(fg, host),
+        (long)self.stableCount, self.dirty ? 1 : 0, self.workerTimer ? 1 : 0,
         self.appliedStyle.blur, (long)self.glassView.activeEffectStyle,
         self.appliedStyle.refraction,
         self.appliedStyle.highlight, self.appliedStyle.veil,
@@ -1314,80 +1415,6 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     // 强制下次进来时重新走一遍「模式变化 -> 恢复 -> 重选」, 避免拿旧缓存的层
     // 去写 alpha(teardown 之后视图已经被系统回收了)。
     self.lastAppliedMode = (KGWorkMode)-1;
-}
-
-#pragma mark - 兜底路径 (宿主类名不认识时)
-
-static NSArray<NSString *> *KGBackdropClassHints(void) {
-    static NSArray *hints = nil;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        hints = @[ @"InputBackdrop", @"KeyboardBackdrop", @"UIKBBackdropView" ];
-    });
-    return hints;
-}
-
-- (UIView *)findBackdropByNameIn:(UIView *)root {
-    UIView *best = nil;
-    CGFloat bestArea = 0;
-
-    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:root];
-    NSUInteger guard = 0;
-    while (queue.count > 0 && guard++ < 4000) {
-        UIView *current = queue.firstObject;
-        [queue removeObjectAtIndex:0];
-
-        if (current != nil) {
-            NSString *name = NSStringFromClass(current.class);
-            for (NSString *hint in KGBackdropClassHints()) {
-                if (![name containsString:hint]) continue;
-                CGRect f = current.frame;
-                CGFloat area = f.size.width * f.size.height;
-                if (area > bestArea) {
-                    bestArea = area;
-                    best = current;
-                }
-                break;
-            }
-        }
-        [queue addObjectsFromArray:current.subviews];
-    }
-    return best;
-}
-
-- (void)legacyRefreshWithRoot:(UIView *)root {
-    if (!KGModeShowsGlass([KGPrefs workMode])) return;   // 只有「插玻璃层」的档位才动视图
-    if (self.glassView.superview != nil) return;         // 已经装好了, 别乱动
-
-    UIView *found = [self findBackdropByNameIn:root];
-    if (!found) return;
-    if (!KGIsKeyboardSized(found) || !KGIsOnScreen(found)) return;
-
-    UIView *host = found.superview;
-    if (!host) return;
-
-    KGLog(@"兜底路径命中背板 %@", NSStringFromClass(found.class));
-    if (!self.glassView) {
-        self.glassView = [[KGGlassView alloc] initWithFrame:host.bounds];
-        self.hasAppliedStyle = NO;
-    }
-    self.glassView.frame = host.bounds;
-
-    // v0.4.3: 同样修掉「找不到按键层就插 index 0」的坏行为。
-    // 找不到 = 不知道插哪, 那就不插。少一层玻璃无所谓, 键盘不能用是致命的。
-    UIView *fg = [self firstKeyLayerInHost:host];
-    UIView *anchor = fg ? [self ancestorOf:fg under:host] : nil;
-    if (!anchor) {
-        KGLog(@"兜底路径找不到按键层, 放弃插玻璃");
-        return;
-    }
-    [host insertSubview:self.glassView belowSubview:anchor];
-    self.glassView.hidden = NO;
-
-    self.hostView = host;
-    [self enforceNativeBackdropStateInHost:host];
-
-    [self applyStyleForMaterial:[KGPrefs material]];
 }
 
 @end

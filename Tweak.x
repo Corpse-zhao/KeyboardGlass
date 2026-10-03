@@ -14,44 +14,59 @@
 @interface UIInputSetHostView : UIView
 @end
 
-// 入口 1 (主): 键盘宿主视图自己的 layoutSubviews。
-// 它的 frame 就是键盘矩形, 且一定存在 —— 不用猜任何私有背板类名,
-// 时机也最准 (键盘弹出 / 收起 / 改尺寸 / 换键盘都会走到)。
+// ======================================================================
+// 【v0.7.2 架构定论 —— hook 里一行都不许改视图树】
+// ======================================================================
+//
+// v0.7.1 用户实测「又打不了字了」。2026-10-03 03:56 的探针把死因钉死了:
+// 同一秒内 25 次宿主采样, 宿主 frame 在**两个值之间来回震荡**:
+//   {{0,932},{430,243}}   y=932 已在屏幕外(收起动画末帧)
+//   {{0,857},{430, 75}}   屏幕上只剩 75pt(收起态 dock 条)
+// 整份日志 151212 个 dump 块 / 75513 行 #0 UIKeyboardDockView —— 键盘被卡死
+// 在展开动画里反复重排, 永远落不了地。用户看到的现象就是「打不了字」。
+//
+// 震动的成因链 (每一环都是 v0.4.x~v0.7.1 亲手接上的):
+//   宿主 layoutSubviews -> 我们插玻璃 / 改玻璃 frame -> 触发宿主重排
+//     -> 再次 layoutSubviews -> 玻璃 frame 又跟上一个新布局
+//       -> … 两个布局解互相拉扯, 乒乓不收敛。
+//
+// 【为什么之前那些防护全都没挡住】
+// - 静态 BOOL kgInLayout 重入闸: 只能挡**同步递归**, 挡不住「改 frame ->
+//   异步触发下一次 layout -> 回调又进来」这条跨消息回路。它挡的是 A,
+//   死因是 B, 两者毫不相干。
+// - v0.6.0 的 lastAppliedMode: 只管恢复时机, 不管玻璃 frame 的写入。
+// - v0.7.1 的 insertSubview:atIndex:0「暂驻底部」: 恰恰**加重**了它 ——
+//   玻璃从此常驻宿主, 每一次重排都带着它一起重排, 两个布局解互相拉扯。
+//
+// 结论: **凡是会在 layoutSubviews 里改视图树的设计, 一律不要用。**
+// 布局回调只做一件事 —— 记下宿主、置一个脏标记, 然后立刻返回。
+// 真正干活的是一个 0.4s 的定时器, 且只在「宿主 frame 连续两次采样完全相同」
+// (也就是键盘已经彻底稳定) 时才动手。这两个改动一起切断反馈链。
+//
+// 【这个教训的通用形式 —— 第 8 版了, 写在这里防止再犯】
+//   在系统视图的布局回调里修改该视图树的任何一部分(加/删 subview、
+//   改 frame、改 alpha), 都是**给自己造一个可能不收敛的反馈环**。
+//   正确姿势永远是: 回调里只观测, 变更交给「稳定之后」再执行。
+//
+// ----------------------------------------------------------------------
 %hook UIInputSetHostView
 
 - (void)layoutSubviews {
     %orig;
-
-    // 我们在里面会往宿主上加东西, 可能又触发一次布局 —— 加个重入闸,
-    // 避免无限递归。
-    static BOOL kgInLayout = NO;
-    if (kgInLayout) return;
-    kgInLayout = YES;
-    @try {
-        [[KGKeyboardInstaller shared] handleHostView:self];
-    } @catch (NSException *exception) {
-        // v0.4.2: 异常要走熔断计数, 不能只打日志。连续崩到阈值就整个停手,
-        // 宁可没玻璃也不能再把用户送进安全模式。
-        KGLog(@"宿主布局处理异常: %@", exception);
-        [KGKeyboardInstaller noteHandledException:exception where:@"layoutSubviews"];
-    }
-    kgInLayout = NO;
+    // 只观测, 不动手。见文件头那段说明。
+    [[KGKeyboardInstaller shared] noteHostLayout:self];
 }
 
 %end
 
 // 入口 2 (兜底): 系统键盘的容器控制器。
 // 万一某些 iOS 版本/场景没有 UIInputSetHostView, 从这一层找也一样能装。
+// 同样**只观测, 不动手**。
 %hook UIInputWindowController
 
 - (void)viewDidLayoutSubviews {
     %orig;
-    @try {
-        [[KGKeyboardInstaller shared] handleLayout:self.view];
-    } @catch (NSException *exception) {
-        KGLog(@"布局处理异常: %@", exception);
-        [KGKeyboardInstaller noteHandledException:exception where:@"viewDidLayoutSubviews"];
-    }
+    [[KGKeyboardInstaller shared] noteContainerLayout:self.view];
 }
 
 %end
@@ -65,6 +80,7 @@
 %ctor {
     @autoreleasepool {
         [KGPrefs registerDefaults];
-        KGLog(@"KeyboardGlass 已加载 (0.7.1)");
+        [[KGKeyboardInstaller shared] startWorker];
+        KGLog(@"KeyboardGlass 已加载 (0.7.2)");
     }
 }
