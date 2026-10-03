@@ -24,7 +24,7 @@ static void KGProbe(NSString *msg) {
 // v0.4.3 之前两边是 4 和 5 不一致 —— 插件进程先迁移到自己的版本号, 设置
 // 进程再迁移一次, 谁先跑谁说了算, 迁移结果不确定。这类「双份常量」必须
 // 当成一个字段看待, 改一边就要同时改另一边。
-static const NSInteger kKGParamsVersion = 6;
+static const NSInteger kKGParamsVersion = 7;
 static const NSInteger kKGWorkModeProbe = 0;   // 必须与 KGPrefs.m 的 KGWorkModeProbe 一致
 static const double kKGRecommendedBlur       = 18.0;
 static const double kKGRecommendedRefraction = 14.0;

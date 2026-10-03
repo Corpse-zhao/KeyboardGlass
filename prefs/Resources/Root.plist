@@ -104,7 +104,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>仅在「液态玻璃」档生效。模糊强度最低为 1, 不再允许归零 —— 归零等于把玻璃整个关掉, 键盘会变成完全透明。折射越大, 键盘上边缘的亮带越厚; 底色浓度用来压住通透感、保证按键文字看得清。</string>
+			<string>仅在「液态玻璃」档生效。模糊强度最低为 6，再低就没有可见的磨砂感了——拖到最左看着会像插件没生效。折射越大，键盘上边缘的亮带越厚；底色浓度用来压住通透感、保证按键文字看得清。</string>
 			<key>label</key>
 			<string>液态玻璃参数</string>
 			<key>liquidOnly</key>
@@ -130,7 +130,7 @@
 			<key>max</key>
 			<real>40.0</real>
 			<key>min</key>
-			<real>1.0</real>
+			<real>6.0</real>
 			<key>set</key>
 			<string>setPreferenceValue:specifier:</string>
 			<key>showValue</key>
@@ -272,7 +272,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>玻璃永远插在按键之下, 按键区自带一层不透明底色, 那个底色调淡之后玻璃才能从键缝透上来。拖到 0 = 保持系统原样不动它; 拖到 1 = 只留 15% 底色, 玻璃感最强但按键对比度略降。0.75 左右是观感和可读性的折中。</string>
+			<string>键盘自带两层不透明底色：系统毛玻璃糊的浓白，以及按键区的底图。这个滑块同时调淡它们，让玻璃透上来。拖到 0 = 保持系统原样不动它；拖到 1 = 几乎全透，玻璃感最强但按键对比度会降。0.8 左右是观感和可读性的折中。</string>
 			<key>label</key>
 			<string>按键区底色</string>
 		</dict>
@@ -366,7 +366,7 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>footerText</key>
-			<string>板栗仁 · KeyboardGlass 0.6.0</string>
+			<string>板栗仁 · KeyboardGlass 0.7.0</string>
 		</dict>
 	</array>
 	<key>title</key>

@@ -33,7 +33,7 @@ static const CGFloat kKGDefaultCornerRadius = 10.0;
 // 6 = v0.6.0 删掉 GlassOverKeys (实测两次「打开就打不了字」), 新增「按键区底色调淡」。
 //     **必须升**: 用户存档里 GlassOverKeys 很可能开着, 不迁移的话设置面板里
 //     还会露出那个开关, 用户一开就又打不了字 —— 又是一次「装上就废」。
-static const NSInteger kKGParamsVersion = 6;
+static const NSInteger kKGParamsVersion = 7;
 
 static BOOL kKGDebugEnabled = NO;
 
@@ -186,8 +186,14 @@ void KGLog(NSString *format, ...) {
     // 【v0.5.0】模糊不许为 0。
     // 旧架构下 blur 直接当 backdrop 的 radius, 0 = 整个玻璃关掉, 屏幕全透明。
     // 用户实测存档里就是 blur=0.0, 这是「没达到预期效果」最直接的一条原因。
-    // 新架构下最低档也带雾感, 但仍然把 0 兜到 1, 不给「看起来像没生效」留余地。
-    if (s.blur < 1.0)       s.blur = 1.0;
+    //
+    // 【v0.7.0 下限从 1.0 提到 6.0 —— 1.0 是个陷阱档】
+    // KGEffectStyleForBlur 的档位切分: <=2.5 走 SystemThinMaterial,
+    // 而 ThinMaterial 的磨砂非常弱, 视觉上几乎等于没模糊。用户截图里
+    // 「模糊强度 1.0」就是这么来的 —— 滑块拖到最左, 结果看着像插件没生效,
+    // 实际上模糊在, 只是弱到看不出来。6.0 对应 SystemMaterial, 起雾,
+    // 是「肉眼能确认玻璃存在」的最低档。
+    if (s.blur < 6.0)       s.blur = 6.0;
     return s;
 }
 

@@ -257,6 +257,16 @@ static void KGWriteProbe(NSString *content) {
 }
 
 // 带外观信息的树 dump。光看类名和 frame 分不出「哪一层是可见的键盘背景」。
+//
+// 【v0.7.0 关键修正: 必须按 backgroundColor 的 alpha 排序输出】
+// v0.4.2~v0.6.0 一直把「键盘实心浅灰」归咎于别的东西, 而真正的元凶
+// (_UIVisualEffectBackdropView, bg alpha 0.85) 就在这份 dump 里躺着 ——
+// 只是它埋在很深的层级, 而**排在它上面的那层恰好 alpha 很低**(外层
+// UIKBBackdropView 只有 0.10), 读的时候一眼扫过去就跳过了。
+//
+// 教训: 排查「哪一层不透明」时, **要按不透明度排序, 不能按出现顺序读**。
+// 同一个 dump, 按出现顺序读会一直盯着最外层那层淡的, 永远找不到里面那层浓的。
+// 所以这里额外输出一份「按 bg alpha 降序」的重点嫌疑清单。
 static void KGDumpTreeDetail(UIView *view, NSUInteger depth, NSMutableString *out, NSInteger *budget) {
     if (!view || *budget <= 0 || depth > 14) return;
     (*budget)--;
@@ -277,6 +287,57 @@ static void KGDumpTreeDetail(UIView *view, NSUInteger depth, NSMutableString *ou
     for (UIView *sub in view.subviews) {
         KGDumpTreeDetail(sub, depth + 1, out, budget);
     }
+}
+
+// 【v0.7.0 新增】按「不透明度」排序列出整棵子树里所有带背景色的层。
+// 这份清单的用途: 一眼看出「哪几层在挡着玻璃」, 不用再去逐层推理。
+// 只列 alpha > 0.02 的(全透明的不值得占位), 按 alpha 降序。
+static void KGDumpOpaqueRanking(UIView *root, NSMutableString *out) {
+    if (!root) return;
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:root];
+    NSUInteger guard = 0;
+    CGFloat rootArea = root.frame.size.width * root.frame.size.height;
+    if (rootArea <= 0) rootArea = 1;
+
+    while (queue.count > 0 && guard++ < 4000) {
+        UIView *v = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if (!v) continue;
+
+        UIColor *bg = v.backgroundColor;
+        if (bg) {
+            // getWhite: 只对灰度空间有效, 纯 RGB 颜色会返回 NO -> 这层就漏了。
+            // 两个都试, 只要能取到 alpha 就算数。
+            CGFloat a = 0, r = 0, g = 0, b = 0;
+            if (![bg getRed:&r green:&g blue:&b alpha:&a]) {
+                if (![bg getWhite:NULL alpha:&a]) { a = 0.0; }
+            }
+            if (a > 0.02) {
+                CGFloat area = v.frame.size.width * v.frame.size.height;
+                // 相对面积也要打: 铺满整块键盘的层才是挡玻璃的元凶,
+                // 一个 44x44 的小色块 alpha 再高也不影响观感。
+                [lines addObject:[NSString stringWithFormat:
+                    @"  bgAlpha=%.2f  relArea=%.0f%%  a=%.2f h=%d  %@  %@",
+                    a, 100.0 * area / rootArea, v.alpha, v.hidden ? 1 : 0,
+                    NSStringFromClass(v.class), NSStringFromCGRect(v.frame)]];
+            }
+        }
+        [queue addObjectsFromArray:v.subviews];
+    }
+
+    // alpha 降序 —— 这就是「先看最浓的」的正确读法
+    [lines sortUsingComparator:^NSComparisonResult(NSString *a, NSString *b) {
+        CGFloat aa = [[a substringFromIndex:8] doubleValue];
+        CGFloat bb = [[b substringFromIndex:8] doubleValue];
+        if (aa > bb) return NSOrderedAscending;
+        if (aa < bb) return NSOrderedDescending;
+        return NSOrderedSame;
+    }];
+
+    [out appendFormat:@"==== 不透明层排行 (共 %lu 层, 按 bgAlpha 降序) ====\n",
+     (unsigned long)lines.count];
+    for (NSString *l in lines) [out appendFormat:@"%@\n", l];
 }
 
 static void KGDumpHostChildren(UIView *host, NSString *tag) {
@@ -326,6 +387,9 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 // 而第一张恰好 h=1(隐藏) —— 挑中它 = 调淡一个看不见的东西 = 用户看到的
 // 「还是没变化」。所以必须**整组收集、全部调淡**, 一个都不能漏。
 @property (nonatomic, strong) NSMutableArray<UIView *> *cachedKeyplaneBackdrops;
+// v0.7.0: 系统毛玻璃自己糊的那层浓白底 (_UIVisualEffectBackdropView, bg alpha 0.85)。
+// 「键盘实心浅灰」的真正元凶, 见 systemBlurVeilsInHost:。
+@property (nonatomic, strong) NSMutableArray<UIView *> *cachedBlurVeils;
 @property (nonatomic, assign) BOOL hasAppliedStyle;
 @property (nonatomic, assign) KGStyle appliedStyle;
 // v0.6.0: 上一次处理的工作模式。restoreNativeBackdrops 只在它变化时调一次,
@@ -479,6 +543,10 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     // 「调淡按键区底色」则是让按键区变玻璃的必要步骤, 只要玻璃在就该做。
     if (KGModeShowsGlass(mode) || KGModeHidesBackdrop(mode)) {
         [self enforceKeyplaneBackdropInHost:host];
+        // v0.7.0: 系统毛玻璃那层 85% 浓白才是「实心浅灰」的元凶。
+        // 用同一个滑块(keyplaneDim)驱动, 因为两者都是「把系统自带的底色调淡」,
+        // 用户心智上就是一件事: 「把键盘的底色调淡」。
+        [self enforceSystemBlurVeilInHost:host];
     }
 
     if (KGModeHidesBackdrop(mode)) {
@@ -515,6 +583,9 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
                 (long)[strongHost.layer.sublayers indexOfObject:sub.layer]];
         }
         [out appendString:@"====\n"];
+        // 【v0.7.0 新增】按不透明度排序列出所有带背景色的层。
+        // 这是「哪一层在挡玻璃」的直接答案, 以后不用再靠推理猜。
+        KGDumpOpaqueRanking(strongHost, out);
         KGWriteProbe(out);
     });
 }
@@ -641,6 +712,68 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         [queue addObjectsFromArray:current.subviews];
     }
     return best;
+}
+
+// 找出**系统毛玻璃自己糊的那层 85% 白底**, 整组返回。
+//
+// 【v0.7.0 新增 —— 这才是「键盘实心浅灰」的真正元凶】
+//
+// 2026-10-03 用户实测 v0.6.0 仍然「还是没效果」。回头逐行读探针才发现,
+// 真正的元凶一直摆在日志里, 只是之前没人往下读:
+//
+//   UIKBInputBackdropView   a=0.00
+//     UIKBBackdropView            bg=1.00/1.00/1.00/0.10   ← 白 10%, 很淡
+//       _UIVisualEffectBackdropView bg=1.00/1.00/1.00/0.85  ← ★★★ 白 85%
+//
+// `_UIVisualEffectBackdropView` 是系统自己的模糊层, 它**自带 85% 不透明的
+// 白色底色**。浅色键盘那层「实心浅灰」就是它, 跟按键区、跟 SplitImageView
+// 全都无关。所以 v0.4.2~v0.6.0 一直在调淡/隐藏别的东西, 效果当然出不来。
+//
+// 【为什么旧代码碰不到它】—— backdropInHost: 里有一句「命中即止, 不往这层子树里钻」:
+//   它藏的是**外层** UIKBBackdropView(白 10%), 藏完就 stop, 于是内层那个
+//   白 85% 完好无损地继续显示。
+//   「藏外层自然连带藏内层」这个假设在这里是**错的** —— 因为藏的是 alpha,
+//   而内层自己也有独立 alpha, 内层照样画。
+//
+// 判据: 类名含 "VisualEffectBackdrop" (系统模糊内核), 且自己带高 alpha 背景色。
+// 调淡它的 alpha = 让系统模糊透出底下的 App 画面, 这正是 iOS 26 的观感。
+- (NSArray<UIView *> *)systemBlurVeilsInHost:(UIView *)host {
+    if (!host) return @[];
+    NSMutableArray<UIView *> *found = [NSMutableArray array];
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:host];
+    NSUInteger guard = 0;
+    while (queue.count > 0 && guard++ < 4000) {
+        UIView *current = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        if (!current) continue;
+
+        NSString *name = NSStringFromClass(current.class);
+        if ([name containsString:@"VisualEffectBackdrop"]) {
+            // 只收「自己糊了浓白底」的那些。若哪天系统改成不糊底了(alpha 已经很低),
+            // 就不必动它 —— 动了反而会把它本来就有的模糊也一起弄没。
+            //
+            // 【为什么用 getRed: 而不是 getWhite:】getWhite: 只对**灰度空间**的
+            // 颜色有效, 遇到纯 RGB 颜色会返回 NO —— 那就等于这层被漏掉,
+            // 改完版本用户反馈「还是没效果」。两个都试一遍, 拿 alpha 就行。
+            UIColor *bg = current.backgroundColor;
+            CGFloat a = 0.0;
+            if (bg) {
+                CGFloat r = 0, g = 0, b = 0;
+                if ([bg getRed:&r green:&g blue:&b alpha:&a]) {
+                    // 已取到
+                } else if (![bg getWhite:NULL alpha:&a]) {
+                    a = 0.0;   // 真的取不到就当没有
+                }
+            }
+            if (a > 0.25) {
+                [found addObject:current];
+            }
+        }
+        // 这里**不能** continue: 必须继续往下钻, 因为外层没有 BackgroundColor,
+        // 内层才有。我们要的就是内层这个。
+        [queue addObjectsFromArray:current.subviews];
+    }
+    return found;
 }
 
 // 找出**按键区自带的那些不透明底板层**, 整组返回。
@@ -915,6 +1048,64 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     }
 }
 
+// 调淡系统毛玻璃自己糊的那层浓白底 —— 「键盘实心浅灰」的真正解法。
+//
+// v0.7.0 新增。**这个才是元凶**, 前面五个版本全在调别的东西:
+//
+//   _UIVisualEffectBackdropView bg=1.00/1.00/1.00/0.85
+//
+// 它是系统自己的模糊层, 自带 85% 浓白。调淡它 = 键盘整体透出底下的 App 画面,
+// 观感上就是 iOS 26 那种「键盘浮在 App 上、内容隐约可见」的样子。
+//
+// 【为什么必须调 alpha 而不是换 effect】—— 换成 UIBlurEffect 的其他档位
+// 只会换掉模糊半径, 换不掉那 85% 白底(它跟着 UIBlurEffect 一起生成)。
+// 要让白色退下去, 只能动 alpha。
+//
+// 【为什么留 0.06 而不是归零】—— 归零会让这层子树退出 hitTest,
+// v0.4.0 实测「又不能点击了」。留一点点既透得过去, 子树也还在。
+- (void)enforceSystemBlurVeilInHost:(UIView *)host {
+    if (!self.hiddenBackdrops) {
+        self.hiddenBackdrops = [NSMapTable weakToStrongObjectsMapTable];
+    }
+
+    BOOL needReselect = NO;
+    if (!self.cachedBlurVeils) {
+        needReselect = YES;
+    } else {
+        for (UIView *v in self.cachedBlurVeils) {
+            if (!v.superview) { needReselect = YES; break; }
+        }
+    }
+
+    if (needReselect) {
+        self.cachedBlurVeils = [[self systemBlurVeilsInHost:host] mutableCopy];
+        for (UIView *v in self.cachedBlurVeils) {
+            [self.hiddenBackdrops setObject:@(v.alpha) forKey:v];
+        }
+        if (self.cachedBlurVeils.count > 0) {
+            KGLog(@"锁定系统毛玻璃白底 %lu 层: %@",
+                  (unsigned long)self.cachedBlurVeils.count,
+                  [[self.cachedBlurVeils valueForKey:@"class"] componentsJoinedByString:@","]);
+        } else {
+            KGLog(@"没找到系统毛玻璃白底层");
+        }
+    }
+
+    CGFloat strength = [KGPrefs keyplaneDim];
+    if (strength <= 0.001) return;   // 拖到 0 = 完全保持系统原样
+
+    for (UIView *v in self.cachedBlurVeils) {
+        if (!v.superview) continue;
+        NSNumber *origin = [self.hiddenBackdrops objectForKey:v];
+        if (!origin) continue;
+        // 最多只留 6% 底色。再高就又变回「实心浅灰」了。
+        CGFloat target = origin.doubleValue * (1.0 - MIN(0.94, strength));
+        if (fabs(v.alpha - target) > 0.001) {
+            v.alpha = target;
+        }
+    }
+}
+
 - (void)applyStyleForMaterial:(KGMaterial)material {
     if (!self.glassView) return;
     BOOL dark = (self.hostView.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark);
@@ -959,6 +1150,25 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     }
     if (kbDesc.length == 0) [kbDesc appendString:@"none"];
 
+    // v0.7.0: 系统毛玻璃那层浓白底的状态。「键盘实心浅灰」就看这一行 ——
+    // veilDesc= 不是 none 且 now 明显小于 origin, 说明那 85% 白底已经被调淡了。
+    NSMutableString *veilDesc = [NSMutableString string];
+    for (UIView *v in self.cachedBlurVeils) {
+        NSNumber *origin = [self.hiddenBackdrops objectForKey:v];
+        CGFloat bgA = 0;
+        UIColor *c = v.backgroundColor;
+        if (c) {
+            CGFloat r = 0, g = 0, b = 0;
+            if (![c getRed:&r green:&g blue:&b alpha:&bgA]) {
+                if (![c getWhite:NULL alpha:&bgA]) { bgA = 0.0; }
+            }
+        }
+        [veilDesc appendFormat:@"%@(bgA=%.2f,origin=%.2f,now=%.2f) ",
+           NSStringFromClass(v.class), bgA,
+           origin ? origin.doubleValue : -1.0, v.alpha];
+    }
+    if (veilDesc.length == 0) [veilDesc appendString:@"none"];
+
     // 玻璃正下方那三层是谁 —— 玻璃是 backdrop, 采样源就在它下面。
     // 如果这几层里有东西仍然不透明, 玻璃就采不到键盘外面的画面。
     //
@@ -983,12 +1193,13 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
 
     // signature 要把底板层数和真实 alpha 都算进去: v0.6.0 之前只记了类名,
     // 结果「3 张图里只调淡了 1 张」这种状态探针完全看不出来(签名没变就不重写)。
-    NSString *signature = [NSString stringWithFormat:@"%@|%@|%@|%ld|%ld|%ld|%ld|%@|%.3f|%lu|%.3f",
+    NSString *signature = [NSString stringWithFormat:@"%@|%@|%@|%ld|%ld|%ld|%ld|%@|%.3f|%lu|%.3f|%@",
         NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
         bg ? NSStringFromClass(bg.class) : @"none",
         (long)vi, (long)li, (long)fi, (long)mode,
         kbDesc, bg.alpha,
-        (unsigned long)self.cachedKeyplaneBackdrops.count, [KGPrefs keyplaneDim]];
+        (unsigned long)self.cachedKeyplaneBackdrops.count, [KGPrefs keyplaneDim],
+        veilDesc];
     if ([signature isEqualToString:self.lastProbeSignature]) return;
     self.lastProbeSignature = signature;
     if (self.probeCount++ > 60) return;
@@ -998,6 +1209,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         @"         blurStyle=%.1f effect=%ld refraction=%.1f highlight=%.2f veil=%.2f radius=%.1f outline=%d material=%ld dark=%d keyDim=%.2f\n"
         @"         hiddenBg=%@\n"
         @"         keyBg=%@\n"
+        @"         veilDesc=%@\n"
         @"         underGlass=%@\n",
         [NSDate date], (long)mode,
         NSStringFromClass(host.class), NSStringFromCGRect(host.frame),
@@ -1010,7 +1222,7 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
         self.appliedStyle.highlight, self.appliedStyle.veil,
         self.appliedStyle.cornerRadius, [KGPrefs showLayerOutline],
         (long)material, self.appliedStyle.dark, [KGPrefs keyplaneDim],
-        bgDesc, kbDesc, underDesc]);
+        bgDesc, kbDesc, veilDesc, underDesc]);
 }
 
 - (void)restoreNativeBackdrops {
@@ -1027,6 +1239,8 @@ static void KGDumpHostChildren(UIView *host, NSString *tag) {
     // v0.6.0: 按键区底板也要清, 否则它留在缓存里, 下次切档时 enforce 会拿
     // 一批已经不在树上的旧层去写 alpha —— 轻则没效果, 重则报错。
     self.cachedKeyplaneBackdrops = nil;
+    // v0.7.0: 同理, 系统毛玻璃白底。
+    self.cachedBlurVeils = nil;
 }
 
 - (void)teardown {
